@@ -163,91 +163,96 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
-// ==================== FLAG TESTS ====================
+// ==================== LOGGER TESTS ====================
 
-func TestHasFlag(t *testing.T) {
-	tests := []struct {
-		name  string
-		args  []string
-		flags []string
-		want  bool
-	}{
-		{"flag present", []string{"cmd", "--json"}, []string{"--json", "-j"}, true},
-		{"short flag present", []string{"cmd", "-j"}, []string{"--json", "-j"}, true},
-		{"flag absent", []string{"cmd", "--verbose"}, []string{"--json", "-j"}, false},
-		{"multiple flags some present", []string{"cmd", "--verbose", "--json"}, []string{"--json"}, true},
-		{"empty args", []string{"cmd"}, []string{"--json"}, false},
+func TestSetVerbose(t *testing.T) {
+	origLevel := logLevel
+	defer func() { logLevel = origLevel }()
+
+	logLevel = LevelWarn
+	SetVerbose(true)
+	if logLevel != LevelDebug {
+		t.Errorf("SetVerbose(true): logLevel = %d, want %d", logLevel, LevelDebug)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			origArgs := os.Args
-			defer func() { os.Args = origArgs }()
-			os.Args = tt.args
 
-			got := hasFlag(tt.flags...)
-			if got != tt.want {
-				t.Errorf("hasFlag(%v) with args %v = %v, want %v", tt.flags, tt.args, got, tt.want)
-			}
-		})
+	// SetVerbose(false) should not change level
+	logLevel = LevelWarn
+	SetVerbose(false)
+	if logLevel != LevelWarn {
+		t.Errorf("SetVerbose(false): logLevel = %d, want %d", logLevel, LevelWarn)
 	}
 }
 
-func TestGetFlagInt(t *testing.T) {
-	tests := []struct {
-		name       string
-		args       []string
-		long       string
-		short      string
-		defaultVal int
-		want       int
-	}{
-		{"flag with value", []string{"cmd", "--interval", "30"}, "--interval", "-i", 10, 30},
-		{"short flag with value", []string{"cmd", "-i", "60"}, "--interval", "-i", 10, 60},
-		{"flag missing returns default", []string{"cmd"}, "--interval", "-i", 10, 10},
-		{"flag with invalid value returns default", []string{"cmd", "--interval", "abc"}, "--interval", "-i", 10, 10},
-		{"flag with zero value returns default", []string{"cmd", "--interval", "0"}, "--interval", "-i", 10, 10},
-		{"flag at end without value returns default", []string{"cmd", "--interval"}, "--interval", "-i", 10, 10},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			origArgs := os.Args
-			defer func() { os.Args = origArgs }()
-			os.Args = tt.args
+func TestLogLevels(t *testing.T) {
+	origLevel := logLevel
+	defer func() { logLevel = origLevel }()
 
-			got := getFlagInt(tt.long, tt.short, tt.defaultVal)
-			if got != tt.want {
-				t.Errorf("getFlagInt(%q, %q, %d) with args %v = %d, want %d",
-					tt.long, tt.short, tt.defaultVal, tt.args, got, tt.want)
-			}
-		})
+	// Capture stderr
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	// At default level (Warn), debug should be hidden
+	logLevel = LevelWarn
+	logDebug("hidden message")
+	logWarn("visible warning")
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	if strings.Contains(output, "hidden message") {
+		t.Error("debug message should be hidden at Warn level")
+	}
+	if !strings.Contains(output, "visible warning") {
+		t.Error("warn message should be visible at Warn level")
+	}
+
+	// At debug level, debug should be visible
+	r2, w2, _ := os.Pipe()
+	os.Stderr = w2
+
+	logLevel = LevelDebug
+	logDebug("now visible")
+
+	w2.Close()
+	os.Stderr = oldStderr
+
+	var buf2 [4096]byte
+	n2, _ := r2.Read(buf2[:])
+	output2 := string(buf2[:n2])
+
+	if !strings.Contains(output2, "now visible") {
+		t.Error("debug message should be visible at Debug level")
 	}
 }
 
-func TestGetFlagString(t *testing.T) {
-	tests := []struct {
-		name  string
-		args  []string
-		long  string
-		short string
-		want  string
-	}{
-		{"flag with value", []string{"cmd", "--name", "xbox"}, "--name", "-n", "xbox"},
-		{"short flag with value", []string{"cmd", "-n", "xbox"}, "--name", "-n", "xbox"},
-		{"flag missing returns empty", []string{"cmd"}, "--name", "-n", ""},
-		{"flag at end without value returns empty", []string{"cmd", "--name"}, "--name", "-n", ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			origArgs := os.Args
-			defer func() { os.Args = origArgs }()
-			os.Args = tt.args
+// ==================== COBRA CLI TESTS ====================
 
-			got := getFlagString(tt.long, tt.short)
-			if got != tt.want {
-				t.Errorf("getFlagString(%q, %q) with args %v = %q, want %q",
-					tt.long, tt.short, tt.args, got, tt.want)
-			}
-		})
+func TestCobraRootHelp(t *testing.T) {
+	// Capture stdout
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	rootCmd.SetArgs([]string{"--help"})
+	rootCmd.Execute()
+
+	w.Close()
+	os.Stdout = old
+
+	var buf [8192]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	subcommands := []string{"clients", "network", "wireless", "mesh", "all", "poll", "monitor", "report", "status", "purge", "setup", "api", "version", "reboot", "block", "unblock", "alias"}
+	for _, cmd := range subcommands {
+		if !strings.Contains(output, cmd) {
+			t.Errorf("root help should list %q subcommand", cmd)
+		}
 	}
 }
 

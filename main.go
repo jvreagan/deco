@@ -1,192 +1,296 @@
 package main
 
 import (
-	"fmt"
 	"os"
-	"strings"
+
+	"github.com/spf13/cobra"
 )
 
 var version = "dev"
 
+var rootCmd = &cobra.Command{
+	Use:   "deco",
+	Short: "Deco Network Tool",
+	Long:  "CLI tool for TP-Link Deco mesh router management",
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		verbose, _ := cmd.Flags().GetBool("verbose")
+		SetVerbose(verbose)
+	},
+}
+
+func init() {
+	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "Show debug output on stderr")
+
+	rootCmd.AddCommand(
+		clientsCmd(),
+		networkCmd(),
+		wirelessCmd(),
+		meshCmd(),
+		allCmd(),
+		pollCmd(),
+		monitorCmd(),
+		reportCmd(),
+		statusCmd(),
+		purgeCmd(),
+		setupCmd(),
+		apiCmd(),
+		versionCmd(),
+		rebootCmd(),
+		blockCmd(),
+		unblockCmd(),
+		aliasCmd(),
+	)
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		printUsage()
-		os.Exit(1)
-	}
-
-	cmd := os.Args[1]
-
-	switch cmd {
-	case "clients":
-		if hasFlag("--watch", "-w") {
-			interval := getFlagInt("--interval", "-i", 5)
-			runWatch(interval)
-		} else {
-			jsonOut := hasFlag("--json", "-j")
-			runClients(jsonOut)
-		}
-	case "network":
-		jsonOut := hasFlag("--json", "-j")
-		runNetwork(jsonOut)
-	case "wireless":
-		jsonOut := hasFlag("--json", "-j")
-		runWireless(jsonOut)
-	case "mesh":
-		jsonOut := hasFlag("--json", "-j")
-		runMesh(jsonOut)
-	case "all":
-		runAll()
-	case "poll":
-		interval := getFlagInt("--interval", "-i", 5)
-		runPoll(interval)
-	case "monitor":
-		interval := getFlagInt("--interval", "-i", 60)
-		runMonitor(interval)
-	case "report":
-		period := "today"
-		if len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {
-			period = os.Args[2]
-		}
-		jsonOut := hasFlag("--json", "-j")
-		runReport(period, jsonOut)
-	case "status":
-		runStatus()
-	case "purge":
-		force := hasFlag("--force", "-f")
-		runPurge(force)
-	case "setup":
-		runSetup()
-	case "api":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: deco api <endpoint> [json_body]")
-			fmt.Println("Example: deco api 'admin/client?form=client_list' '{\"operation\":\"read\"}'")
-			os.Exit(1)
-		}
-		endpoint := os.Args[2]
-		body := "{}"
-		if len(os.Args) > 3 {
-			body = os.Args[3]
-		}
-		runAPI(endpoint, body)
-	case "version":
-		runVersion()
-	case "reboot":
-		runReboot()
-	case "block":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: deco block <MAC>")
-			os.Exit(1)
-		}
-		runBlock(os.Args[2])
-	case "unblock":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: deco unblock <MAC>")
-			os.Exit(1)
-		}
-		runUnblock(os.Args[2])
-	case "alias":
-		runAlias()
-	case "completion":
-		if len(os.Args) < 3 {
-			fmt.Println("Usage: deco completion <bash|zsh|fish>")
-			fmt.Println("\nAdd to your shell profile:")
-			fmt.Println("  eval \"$(deco completion bash)\"   # bash")
-			fmt.Println("  eval \"$(deco completion zsh)\"    # zsh")
-			fmt.Println("  deco completion fish | source     # fish")
-			os.Exit(1)
-		}
-		runCompletion(os.Args[2])
-	default:
-		printUsage()
+	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
 
-func printUsage() {
-	fmt.Println(`Deco Network Tool
+func clientsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "clients",
+		Short: "List connected devices",
+		Run: func(cmd *cobra.Command, args []string) {
+			watch, _ := cmd.Flags().GetBool("watch")
+			interval, _ := cmd.Flags().GetInt("interval")
+			nameFilter, _ := cmd.Flags().GetString("name")
+			macFilter, _ := cmd.Flags().GetString("mac")
+			if watch {
+				if interval == 0 {
+					interval = 5
+				}
+				runWatch(interval, nameFilter, macFilter)
+			} else {
+				jsonOut, _ := cmd.Flags().GetBool("json")
+				runClients(jsonOut, nameFilter, macFilter)
+			}
+		},
+	}
+	cmd.Flags().BoolP("json", "j", false, "Output as JSON")
+	cmd.Flags().BoolP("watch", "w", false, "Auto-refresh client list")
+	cmd.Flags().IntP("interval", "i", 5, "Refresh interval in seconds")
+	cmd.Flags().StringP("name", "n", "", "Filter by device name")
+	cmd.Flags().StringP("mac", "m", "", "Filter by MAC address")
+	return cmd
+}
 
-Commands:
-  setup                Interactive configuration wizard
-  clients              List connected devices
-  network              Show WAN/LAN configuration
-  wireless             Show WiFi configuration
-  mesh                 Show mesh topology
-  all                  Complete network snapshot (JSON)
-  poll                 Start bandwidth monitoring
-  monitor              Full network monitoring to SQLite
-  report [period]      Show usage report (today/hour/all)
-  status               Show database statistics
-  purge                Delete records (all, or by --days/--before)
-  api <endpoint>       Call a raw API endpoint
-  version              Show version
-  reboot               Reboot the router
-  block <MAC>          Block a device by MAC address
-  unblock <MAC>        Unblock a device by MAC address
-  alias                Manage device aliases
-  completion <shell>   Generate shell completion (bash/zsh/fish)
+func networkCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "network",
+		Short: "Show WAN/LAN configuration",
+		Run: func(cmd *cobra.Command, args []string) {
+			jsonOut, _ := cmd.Flags().GetBool("json")
+			runNetwork(jsonOut)
+		},
+	}
+	cmd.Flags().BoolP("json", "j", false, "Output as JSON")
+	return cmd
+}
 
-Options:
-  --json, -j           Output as JSON
-  --interval, -i N     Polling interval in seconds (default: 5 for poll, 60 for monitor)
-  --force, -f          Skip confirmation for purge/reboot
-  --name, -n <name>    Filter by device name (clients, report)
-  --mac, -m <MAC>      Filter by MAC address (clients, report)
-  --watch, -w          Auto-refresh client list (use with clients)
-  --verbose, -v        Show debug output on stderr
-  --days N             Purge records older than N days
-  --before YYYY-MM-DD  Purge records before date
+func wirelessCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "wireless",
+		Short: "Show WiFi configuration",
+		Run: func(cmd *cobra.Command, args []string) {
+			jsonOut, _ := cmd.Flags().GetBool("json")
+			runWireless(jsonOut)
+		},
+	}
+	cmd.Flags().BoolP("json", "j", false, "Output as JSON")
+	return cmd
+}
 
-Alias usage:
+func meshCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "mesh",
+		Short: "Show mesh topology",
+		Run: func(cmd *cobra.Command, args []string) {
+			jsonOut, _ := cmd.Flags().GetBool("json")
+			runMesh(jsonOut)
+		},
+	}
+	cmd.Flags().BoolP("json", "j", false, "Output as JSON")
+	return cmd
+}
+
+func allCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "all",
+		Short: "Complete network snapshot (JSON)",
+		Run: func(cmd *cobra.Command, args []string) {
+			runAll()
+		},
+	}
+}
+
+func pollCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "poll",
+		Short: "Start bandwidth monitoring",
+		Run: func(cmd *cobra.Command, args []string) {
+			interval, _ := cmd.Flags().GetInt("interval")
+			runPoll(interval)
+		},
+	}
+	cmd.Flags().IntP("interval", "i", 5, "Polling interval in seconds")
+	return cmd
+}
+
+func monitorCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "monitor",
+		Short: "Full network monitoring to SQLite",
+		Run: func(cmd *cobra.Command, args []string) {
+			interval, _ := cmd.Flags().GetInt("interval")
+			runMonitor(interval)
+		},
+	}
+	cmd.Flags().IntP("interval", "i", 60, "Polling interval in seconds")
+	return cmd
+}
+
+func reportCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "report [period]",
+		Short: "Show usage report (today/hour/all)",
+		Args:  cobra.MaximumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			period := "today"
+			if len(args) > 0 {
+				period = args[0]
+			}
+			jsonOut, _ := cmd.Flags().GetBool("json")
+			nameFilter, _ := cmd.Flags().GetString("name")
+			macFilter, _ := cmd.Flags().GetString("mac")
+			runReport(period, jsonOut, nameFilter, macFilter)
+		},
+	}
+	cmd.Flags().BoolP("json", "j", false, "Output as JSON")
+	cmd.Flags().StringP("name", "n", "", "Filter by device name")
+	cmd.Flags().StringP("mac", "m", "", "Filter by MAC address")
+	return cmd
+}
+
+func statusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show database statistics",
+		Run: func(cmd *cobra.Command, args []string) {
+			runStatus()
+		},
+	}
+}
+
+func purgeCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "purge",
+		Short: "Delete records (all, or by --days/--before)",
+		Run: func(cmd *cobra.Command, args []string) {
+			force, _ := cmd.Flags().GetBool("force")
+			beforeStr, _ := cmd.Flags().GetString("before")
+			days, _ := cmd.Flags().GetInt("days")
+			runPurge(force, beforeStr, days)
+		},
+	}
+	cmd.Flags().BoolP("force", "f", false, "Skip confirmation")
+	cmd.Flags().Int("days", 0, "Purge records older than N days")
+	cmd.Flags().String("before", "", "Purge records before date (YYYY-MM-DD)")
+	return cmd
+}
+
+func setupCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "setup",
+		Short: "Interactive configuration wizard",
+		Run: func(cmd *cobra.Command, args []string) {
+			runSetup()
+		},
+	}
+}
+
+func apiCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "api <endpoint> [json_body]",
+		Short: "Call a raw API endpoint",
+		Long: `Call a raw API endpoint.
+
+Example: deco api 'admin/client?form=client_list' '{"operation":"read"}'`,
+		Args: cobra.RangeArgs(1, 2),
+		Run: func(cmd *cobra.Command, args []string) {
+			endpoint := args[0]
+			body := "{}"
+			if len(args) > 1 {
+				body = args[1]
+			}
+			runAPI(endpoint, body)
+		},
+	}
+}
+
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Show version",
+		Run: func(cmd *cobra.Command, args []string) {
+			runVersion()
+		},
+	}
+}
+
+func rebootCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "reboot",
+		Short: "Reboot the router",
+		Run: func(cmd *cobra.Command, args []string) {
+			force, _ := cmd.Flags().GetBool("force")
+			runReboot(force)
+		},
+	}
+	cmd.Flags().BoolP("force", "f", false, "Skip confirmation")
+	return cmd
+}
+
+func blockCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "block <MAC>",
+		Short: "Block a device by MAC address",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			runBlock(args[0])
+		},
+	}
+}
+
+func unblockCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unblock <MAC>",
+		Short: "Unblock a device by MAC address",
+		Args:  cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			runUnblock(args[0])
+		},
+	}
+}
+
+func aliasCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "alias [MAC] [name]",
+		Short: "Manage device aliases",
+		Long: `Manage device aliases.
+
+Usage:
   deco alias                    List all aliases
   deco alias <MAC> <name>       Set an alias
-  deco alias --remove <MAC>     Remove an alias
-
-Examples:
-  deco setup
-  deco clients
-  deco clients --json
-  deco clients --name xbox
-  deco clients --watch
-  deco poll --interval 10
-  deco monitor
-  deco monitor --interval 30
-  deco report today
-  deco report hour --json
-  deco purge --force
-  deco alias AA-BB-CC-DD-EE-FF "Living Room TV"
-  deco reboot
-  eval "$(deco completion bash)"`)
-}
-
-func hasFlag(flags ...string) bool {
-	for _, arg := range os.Args {
-		for _, flag := range flags {
-			if arg == flag {
-				return true
-			}
-		}
+  deco alias --remove <MAC>     Remove an alias`,
+		Run: func(cmd *cobra.Command, args []string) {
+			remove, _ := cmd.Flags().GetBool("remove")
+			runAlias(remove, args)
+		},
+		Args: cobra.ArbitraryArgs,
 	}
-	return false
+	cmd.Flags().BoolP("remove", "r", false, "Remove an alias")
+	return cmd
 }
 
-func getFlagInt(long, short string, defaultVal int) int {
-	for i, arg := range os.Args {
-		if (arg == long || arg == short) && i+1 < len(os.Args) {
-			var val int
-			fmt.Sscanf(os.Args[i+1], "%d", &val)
-			if val > 0 {
-				return val
-			}
-		}
-	}
-	return defaultVal
-}
-
-func getFlagString(long, short string) string {
-	for i, arg := range os.Args {
-		if (arg == long || arg == short) && i+1 < len(os.Args) {
-			return os.Args[i+1]
-		}
-	}
-	return ""
-}

@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ==================== MOCK DECO SERVER ====================
@@ -783,29 +784,6 @@ func TestToBool(t *testing.T) {
 	}
 }
 
-func TestCompletionScripts(t *testing.T) {
-	t.Run("bash", func(t *testing.T) {
-		if !strings.Contains(bashCompletion, "complete -F _deco_completions deco") {
-			t.Error("bash completion should contain complete command")
-		}
-		if !strings.Contains(bashCompletion, "clients") {
-			t.Error("bash completion should contain 'clients' command")
-		}
-	})
-
-	t.Run("zsh", func(t *testing.T) {
-		if !strings.Contains(zshCompletion, "#compdef deco") {
-			t.Error("zsh completion should contain compdef")
-		}
-	})
-
-	t.Run("fish", func(t *testing.T) {
-		if !strings.Contains(fishCompletion, "complete -c deco") {
-			t.Error("fish completion should contain complete -c deco")
-		}
-	})
-}
-
 func TestClientListJSON(t *testing.T) {
 	data := &ClientList{
 		Clients: []ClientInfo{
@@ -844,6 +822,41 @@ func TestClientListJSON(t *testing.T) {
 }
 
 // ==================== SESSION EXPIRY RETRY TEST ====================
+
+func TestProactiveSessionRefresh(t *testing.T) {
+	client, _, _ := setupMockClient(t, "testpass")
+
+	if err := client.Authorize(); err != nil {
+		t.Fatalf("Authorize failed: %v", err)
+	}
+
+	origStok := client.stok
+	if !client.logged {
+		t.Fatal("should be logged in")
+	}
+
+	// Backdate lastAuthTime to simulate a stale session
+	client.lastAuthTime = time.Now().Add(-6 * time.Minute)
+
+	// EnsureAuthorized should detect the stale session and re-authenticate
+	if err := client.EnsureAuthorized(); err != nil {
+		t.Fatalf("EnsureAuthorized failed: %v", err)
+	}
+
+	if !client.logged {
+		t.Error("should be logged in after proactive refresh")
+	}
+
+	// stok should still be valid (same mock returns same stok, but auth was called)
+	if client.stok != origStok {
+		// This is fine — the mock always returns the same stok
+	}
+
+	// Verify lastAuthTime was updated to recent
+	if time.Since(client.lastAuthTime) > 5*time.Second {
+		t.Error("lastAuthTime should have been refreshed")
+	}
+}
 
 func TestSessionExpiryRetry(t *testing.T) {
 	mock := newMockDecoServer(t, "testpass")

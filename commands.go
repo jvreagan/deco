@@ -94,7 +94,6 @@ func connectClient() (*DecoClient, *Config) {
 	}
 
 	client := NewDecoClient(config.Host, config.Password)
-	client.verbose = hasFlag("--verbose", "-v")
 	if err := client.Authorize(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
 		os.Exit(1)
@@ -103,7 +102,7 @@ func connectClient() (*DecoClient, *Config) {
 	return client, config
 }
 
-func runClients(jsonOut bool) {
+func runClients(jsonOut bool, nameFilter, macFilter string) {
 	client, _ := connectClient()
 	defer client.Logout()
 
@@ -113,9 +112,6 @@ func runClients(jsonOut bool) {
 		os.Exit(1)
 	}
 
-	// Apply filters
-	nameFilter := getFlagString("--name", "-n")
-	macFilter := getFlagString("--mac", "-m")
 	if nameFilter != "" || macFilter != "" {
 		data = filterClients(data, nameFilter, macFilter)
 	}
@@ -127,7 +123,7 @@ func runClients(jsonOut bool) {
 	}
 }
 
-func runWatch(interval int) {
+func runWatch(interval int, nameFilter, macFilter string) {
 	config, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -141,9 +137,6 @@ func runWatch(interval int) {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-
-	nameFilter := getFlagString("--name", "-n")
-	macFilter := getFlagString("--mac", "-m")
 
 	client := NewDecoClient(config.Host, config.Password)
 	defer client.Logout()
@@ -631,7 +624,7 @@ func runMonitor(interval int) {
 	}
 }
 
-func runReport(period string, jsonOut bool) {
+func runReport(period string, jsonOut bool, nameFilter, macFilter string) {
 	db, err := initDB()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -705,9 +698,6 @@ func runReport(period string, jsonOut bool) {
 		fmt.Fprintf(os.Stderr, "Warning: error iterating rows: %v\n", err)
 	}
 
-	// Apply filters (check aliases too)
-	nameFilter := getFlagString("--name", "-n")
-	macFilter := getFlagString("--mac", "-m")
 	if nameFilter != "" || macFilter != "" {
 		aliases := loadAliases()
 		var filtered []ReportDevice
@@ -797,7 +787,7 @@ func runStatus() {
 	fmt.Printf("Last sample: %s\n", lastSample.String)
 }
 
-func runPurge(force bool) {
+func runPurge(force bool, beforeStr string, days int) {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		fmt.Println("No database found. Nothing to purge.")
 		return
@@ -809,10 +799,6 @@ func runPurge(force bool) {
 		return
 	}
 
-	// Check for selective purge flags
-	beforeStr := getFlagString("--before", "")
-	daysStr := getFlagInt("--days", "", 0)
-
 	var cutoff time.Time
 	selective := false
 	if beforeStr != "" {
@@ -823,8 +809,8 @@ func runPurge(force bool) {
 			return
 		}
 		selective = true
-	} else if daysStr > 0 {
-		cutoff = time.Now().AddDate(0, 0, -daysStr)
+	} else if days > 0 {
+		cutoff = time.Now().AddDate(0, 0, -days)
 		selective = true
 	}
 
@@ -908,9 +894,7 @@ func runPurge(force bool) {
 	fmt.Printf("Database size after purge: %s\n", formatSize(getDBSize()))
 }
 
-func runReboot() {
-	force := hasFlag("--force", "-f")
-
+func runReboot(force bool) {
 	if !force {
 		fmt.Print("Reboot the router? This will disconnect all devices. Type 'yes' to confirm: ")
 		var confirm string
@@ -966,31 +950,31 @@ func runUnblock(mac string) {
 	fmt.Printf("Unblocked device %s\n", mac)
 }
 
-func runAlias() {
+func runAlias(remove bool, args []string) {
 	aliases := loadAliases()
 
-	// No args: list aliases
-	if len(os.Args) < 3 || strings.HasPrefix(os.Args[2], "-") {
-		if hasFlag("--remove", "-r") {
-			if len(os.Args) < 4 {
-				fmt.Println("Usage: deco alias --remove <MAC>")
-				os.Exit(1)
-			}
-			mac := strings.ToUpper(os.Args[3])
-			if !validMAC(mac) {
-				fmt.Fprintf(os.Stderr, "Error: invalid MAC address %q\n", mac)
-				os.Exit(1)
-			}
-			if _, ok := aliases[mac]; !ok {
-				fmt.Printf("No alias found for %s\n", mac)
-				os.Exit(1)
-			}
-			delete(aliases, mac)
-			saveAliases(aliases)
-			fmt.Printf("Removed alias for %s\n", mac)
-			return
+	if remove {
+		if len(args) < 1 {
+			fmt.Println("Usage: deco alias --remove <MAC>")
+			os.Exit(1)
 		}
+		mac := strings.ToUpper(args[0])
+		if !validMAC(mac) {
+			fmt.Fprintf(os.Stderr, "Error: invalid MAC address %q\n", mac)
+			os.Exit(1)
+		}
+		if _, ok := aliases[mac]; !ok {
+			fmt.Printf("No alias found for %s\n", mac)
+			os.Exit(1)
+		}
+		delete(aliases, mac)
+		saveAliases(aliases)
+		fmt.Printf("Removed alias for %s\n", mac)
+		return
+	}
 
+	// No args: list aliases
+	if len(args) == 0 {
 		if len(aliases) == 0 {
 			fmt.Println("No aliases set. Usage: deco alias <MAC> <name>")
 			return
@@ -1010,35 +994,21 @@ func runAlias() {
 	}
 
 	// Set alias: deco alias <MAC> <name>
-	if len(os.Args) < 4 {
+	if len(args) < 2 {
 		fmt.Println("Usage: deco alias <MAC> <name>")
 		os.Exit(1)
 	}
 
-	mac := strings.ToUpper(os.Args[2])
+	mac := strings.ToUpper(args[0])
 	if !validMAC(mac) {
 		fmt.Fprintf(os.Stderr, "Error: invalid MAC address %q\n", mac)
 		os.Exit(1)
 	}
-	name := strings.Join(os.Args[3:], " ")
+	name := strings.Join(args[1:], " ")
 
 	aliases[mac] = name
 	saveAliases(aliases)
 	fmt.Printf("Set alias: %s -> %s\n", mac, name)
-}
-
-func runCompletion(shell string) {
-	switch shell {
-	case "bash":
-		fmt.Print(bashCompletion)
-	case "zsh":
-		fmt.Print(zshCompletion)
-	case "fish":
-		fmt.Print(fishCompletion)
-	default:
-		fmt.Fprintf(os.Stderr, "Unsupported shell: %s (use bash, zsh, or fish)\n", shell)
-		os.Exit(1)
-	}
 }
 
 func loadAliases() map[string]string {
@@ -1140,117 +1110,3 @@ func printDBLimitError(size int64, action string) {
 	fmt.Println(strings.Repeat("=", 70))
 }
 
-// ==================== COMPLETION SCRIPTS ====================
-
-const bashCompletion = `_deco_completions() {
-    local commands="clients network wireless mesh all poll monitor report status purge setup api version reboot block unblock alias completion"
-    local cur="${COMP_WORDS[COMP_CWORD]}"
-    local prev="${COMP_WORDS[COMP_CWORD-1]}"
-
-    case "$prev" in
-        report)
-            COMPREPLY=($(compgen -W "today hour all" -- "$cur"))
-            return
-            ;;
-        completion)
-            COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
-            return
-            ;;
-    esac
-
-    if [[ ${COMP_CWORD} -eq 1 ]]; then
-        COMPREPLY=($(compgen -W "$commands" -- "$cur"))
-    else
-        COMPREPLY=($(compgen -W "--json -j --interval -i --force -f --name -n --mac -m --watch -w --remove -r --verbose -v --days --before" -- "$cur"))
-    fi
-}
-complete -F _deco_completions deco
-`
-
-const zshCompletion = `#compdef deco
-
-_deco() {
-    local -a commands
-    commands=(
-        'clients:List connected devices'
-        'network:Show WAN/LAN configuration'
-        'wireless:Show WiFi configuration'
-        'mesh:Show mesh topology'
-        'all:Complete network snapshot'
-        'poll:Start bandwidth monitoring'
-        'monitor:Full network monitoring'
-        'report:Show usage report'
-        'status:Show database statistics'
-        'purge:Delete all records'
-        'setup:Interactive configuration'
-        'api:Call a raw API endpoint'
-        'version:Show version'
-        'reboot:Reboot the router'
-        'block:Block a device'
-        'unblock:Unblock a device'
-        'alias:Manage device aliases'
-        'completion:Generate shell completion'
-    )
-
-    _arguments '1:command:->cmds' '*:options:->opts'
-
-    case "$state" in
-        cmds)
-            _describe 'command' commands
-            ;;
-        opts)
-            _arguments \
-                '--json[Output as JSON]' \
-                '-j[Output as JSON]' \
-                '--interval[Polling interval]:seconds:' \
-                '-i[Polling interval]:seconds:' \
-                '--force[Skip confirmation]' \
-                '-f[Skip confirmation]' \
-                '--name[Filter by name]:name:' \
-                '-n[Filter by name]:name:' \
-                '--mac[Filter by MAC]:mac:' \
-                '-m[Filter by MAC]:mac:' \
-                '--watch[Auto-refresh display]' \
-                '-w[Auto-refresh display]' \
-                '--verbose[Show debug output]' \
-                '-v[Show debug output]' \
-                '--days[Purge records older than N days]:days:' \
-                '--before[Purge records before date]:date:'
-            ;;
-    esac
-}
-
-_deco "$@"
-`
-
-const fishCompletion = `complete -c deco -f
-complete -c deco -n '__fish_use_subcommand' -a 'clients' -d 'List connected devices'
-complete -c deco -n '__fish_use_subcommand' -a 'network' -d 'Show WAN/LAN configuration'
-complete -c deco -n '__fish_use_subcommand' -a 'wireless' -d 'Show WiFi configuration'
-complete -c deco -n '__fish_use_subcommand' -a 'mesh' -d 'Show mesh topology'
-complete -c deco -n '__fish_use_subcommand' -a 'all' -d 'Complete network snapshot'
-complete -c deco -n '__fish_use_subcommand' -a 'poll' -d 'Start bandwidth monitoring'
-complete -c deco -n '__fish_use_subcommand' -a 'monitor' -d 'Full network monitoring'
-complete -c deco -n '__fish_use_subcommand' -a 'report' -d 'Show usage report'
-complete -c deco -n '__fish_use_subcommand' -a 'status' -d 'Show database statistics'
-complete -c deco -n '__fish_use_subcommand' -a 'purge' -d 'Delete all records'
-complete -c deco -n '__fish_use_subcommand' -a 'setup' -d 'Interactive configuration'
-complete -c deco -n '__fish_use_subcommand' -a 'api' -d 'Call a raw API endpoint'
-complete -c deco -n '__fish_use_subcommand' -a 'version' -d 'Show version'
-complete -c deco -n '__fish_use_subcommand' -a 'reboot' -d 'Reboot the router'
-complete -c deco -n '__fish_use_subcommand' -a 'block' -d 'Block a device'
-complete -c deco -n '__fish_use_subcommand' -a 'unblock' -d 'Unblock a device'
-complete -c deco -n '__fish_use_subcommand' -a 'alias' -d 'Manage device aliases'
-complete -c deco -n '__fish_use_subcommand' -a 'completion' -d 'Generate shell completion'
-complete -c deco -n '__fish_seen_subcommand_from report' -a 'today hour all'
-complete -c deco -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
-complete -c deco -l json -s j -d 'Output as JSON'
-complete -c deco -l interval -s i -d 'Polling interval' -r
-complete -c deco -l force -s f -d 'Skip confirmation'
-complete -c deco -l name -s n -d 'Filter by name' -r
-complete -c deco -l mac -s m -d 'Filter by MAC' -r
-complete -c deco -l watch -s w -d 'Auto-refresh display'
-complete -c deco -l verbose -s v -d 'Show debug output'
-complete -c deco -l days -d 'Purge records older than N days' -r
-complete -c deco -l before -d 'Purge records before date' -r
-`

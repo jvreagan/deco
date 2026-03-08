@@ -26,15 +26,17 @@ type Config struct {
 	Password string `json:"password"`
 }
 
+const sessionTimeout = 5 * time.Minute
+
 // DecoClient handles API communication
 type DecoClient struct {
-	host     string
-	password string
-	client   *http.Client
-	stok     string
-	sysauth  string
-	logged   bool
-	verbose  bool
+	host         string
+	password     string
+	client       *http.Client
+	stok         string
+	sysauth      string
+	logged       bool
+	lastAuthTime time.Time
 
 	// Encryption
 	aesKey []byte
@@ -72,7 +74,7 @@ func loadConfig() (*Config, error) {
 	// Warn if config file is world-readable
 	if info, statErr := os.Stat(configPath); statErr == nil {
 		if info.Mode().Perm()&0077 != 0 {
-			fmt.Fprintf(os.Stderr, "Warning: %s is readable by other users (mode %o). Consider: chmod 600 %s\n",
+			logWarn("config %s is readable by other users (mode %o). Consider: chmod 600 %s",
 				configPath, info.Mode().Perm(), configPath)
 		}
 	}
@@ -123,8 +125,12 @@ func (dc *DecoClient) baseURL() string {
 
 // EnsureAuthorized checks if the session is active and re-authorizes if needed.
 func (dc *DecoClient) EnsureAuthorized() error {
-	if dc.logged {
+	if dc.logged && time.Since(dc.lastAuthTime) < sessionTimeout {
 		return nil
+	}
+	if dc.logged {
+		logDebug("session older than %s, re-authenticating", sessionTimeout)
+		dc.Invalidate()
 	}
 	// Reset HTTP client to clear stale cookies
 	jar, _ := cookiejar.New(nil) // cookiejar.New never returns an error with nil options
@@ -341,14 +347,13 @@ func (dc *DecoClient) Authorize() error {
 	}
 
 	dc.logged = true
+	dc.lastAuthTime = time.Now()
 	return nil
 }
 
 func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
 	start := time.Now()
-	if dc.verbose {
-		fmt.Fprintf(os.Stderr, "[verbose] POST %s\n", path)
-	}
+	logDebug("POST %s", path)
 
 	jsonData, err := json.Marshal(reqData)
 	if err != nil {
@@ -395,9 +400,7 @@ func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (
 		return nil, fmt.Errorf("failed to read response: %v", err)
 	}
 
-	if dc.verbose {
-		fmt.Fprintf(os.Stderr, "[verbose] %s -> %d (%d bytes, %s)\n", path, resp.StatusCode, len(body), time.Since(start))
-	}
+	logDebug("%s -> %d (%d bytes, %s)", path, resp.StatusCode, len(body), time.Since(start))
 
 	var responseData string
 

@@ -114,12 +114,12 @@ func checkDBCapacity(db *sql.DB) {
 	size := getDBSize()
 	pct := float64(size) / float64(DBSizeLimitBytes) * 100
 	if pct >= 90 {
-		fmt.Fprintf(os.Stderr, "Warning: database at %.0f%% capacity, auto-pruning records older than 30 days\n", pct)
+		logWarn("database at %.0f%% capacity, auto-pruning records older than 30 days", pct)
 		if err := pruneOlderThan(db, 30); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-prune failed: %v\n", err)
+			logWarn("auto-prune failed: %v", err)
 		}
 	} else if pct >= 80 {
-		fmt.Fprintf(os.Stderr, "Warning: database at %.0f%% capacity (%s / %s). Consider running 'deco purge --days 30'\n",
+		logWarn("database at %.0f%% capacity (%s / %s). Consider running 'deco purge --days 30'",
 			pct, formatSize(size), formatSize(DBSizeLimitBytes))
 	}
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -12,7 +11,7 @@ import (
 func printJSON(data interface{}) {
 	out, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error marshaling JSON: %v\n", err)
+		logError("Error marshaling JSON: %v", err)
 		return
 	}
 	fmt.Println(string(out))
