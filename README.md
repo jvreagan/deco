@@ -4,19 +4,38 @@ CLI tool for TP-Link Deco mesh routers. Communicates with the router's encrypted
 
 Tested on the **Deco BE63** but may work with other Deco models that use the same API.
 
+## Installation
+
+### From source
+
+```bash
+go install github.com/jvreagan/deco@latest
+```
+
+### Prebuilt binaries
+
+Download from [Releases](https://github.com/jvreagan/deco/releases) — available for Linux, macOS, and Windows (amd64/arm64).
+
+### Build from source
+
+```bash
+git clone https://github.com/jvreagan/deco.git
+cd deco
+go build -o deco
+```
+
 ## Quick Start
 
 ```bash
-go build -o deco
-./deco setup
-./deco clients
+deco setup
+deco clients
 ```
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `setup` | Interactive configuration wizard |
+| `setup` | Interactive configuration wizard (password is masked) |
 | `clients` | List connected devices (name, IP, MAC, connection type, signal) |
 | `network` | Show WAN/LAN configuration (IPs, DNS, gateway, CPU/memory usage) |
 | `wireless` | Show WiFi configuration (SSIDs, channels, bands, guest network) |
@@ -28,6 +47,11 @@ go build -o deco
 | `status` | Show database statistics (size, record counts, date range) |
 | `purge` | Delete all database records |
 | `api <endpoint> [body]` | Call a raw API endpoint |
+| `version` | Show version |
+| `reboot` | Reboot the router (confirms first, use `--force` to skip) |
+| `block <MAC>` | Block a device by MAC address |
+| `unblock <MAC>` | Unblock a device by MAC address |
+| `alias` | Manage device aliases |
 
 ### Options
 
@@ -35,16 +59,34 @@ go build -o deco
 |---|---|
 | `--json`, `-j` | Output as JSON (works with `clients`, `network`, `wireless`, `mesh`, `report`) |
 | `--interval N`, `-i N` | Polling interval in seconds (default: 5 for `poll`, 60 for `monitor`) |
-| `--force`, `-f` | Skip confirmation prompt for `purge` |
+| `--force`, `-f` | Skip confirmation prompt for `purge` and `reboot` |
+| `--name`, `-n <name>` | Filter by device name — substring, case-insensitive (`clients`, `report`) |
+| `--mac`, `-m <MAC>` | Filter by MAC address — exact match, case-insensitive (`clients`, `report`) |
+
+### Device Aliases
+
+Set friendly names for devices that override the router-reported name:
+
+```bash
+deco alias                              # List all aliases
+deco alias AA-BB-CC-DD-EE-FF "TV"       # Set an alias
+deco alias --remove AA-BB-CC-DD-EE-FF   # Remove an alias
+```
+
+Aliases are stored in `deco_aliases.json` next to the binary and are applied in `clients` and `report` output.
 
 ### Examples
 
 ```bash
 deco clients --json          # JSON device list
+deco clients --name xbox     # Filter by name
+deco clients --mac AA-BB-CC-DD-EE-FF  # Filter by MAC
 deco poll --interval 10      # Bandwidth every 10s
 deco monitor --interval 30   # Full monitoring every 30s
 deco report today            # Today's bandwidth by device
 deco report hour --json      # Last hour as JSON
+deco reboot --force          # Reboot without confirmation
+deco block AA-BB-CC-DD-EE-FF # Block a device
 deco api 'admin/client?form=client_list' '{"operation":"read"}'
 ```
 
@@ -67,10 +109,13 @@ The password is your Deco admin/management password (the one you use to log in t
 go build -o deco
 ```
 
-Requires:
-- Go 1.21+
-- CGO enabled (for SQLite via `mattn/go-sqlite3`)
-- A TP-Link Deco router on your network
+Pure Go — no CGO required. Cross-compiles to any OS/arch.
+
+To embed a version string:
+
+```bash
+go build -ldflags "-X main.version=v1.0.0" -o deco
+```
 
 ## How It Works
 

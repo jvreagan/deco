@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // ==================== PURE UTILITY TESTS ====================
@@ -186,6 +186,34 @@ func TestGetFlagInt(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("getFlagInt(%q, %q, %d) with args %v = %d, want %d",
 					tt.long, tt.short, tt.defaultVal, tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetFlagString(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		long  string
+		short string
+		want  string
+	}{
+		{"flag with value", []string{"cmd", "--name", "xbox"}, "--name", "-n", "xbox"},
+		{"short flag with value", []string{"cmd", "-n", "xbox"}, "--name", "-n", "xbox"},
+		{"flag missing returns empty", []string{"cmd"}, "--name", "-n", ""},
+		{"flag at end without value returns empty", []string{"cmd", "--name"}, "--name", "-n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origArgs := os.Args
+			defer func() { os.Args = origArgs }()
+			os.Args = tt.args
+
+			got := getFlagString(tt.long, tt.short)
+			if got != tt.want {
+				t.Errorf("getFlagString(%q, %q) with args %v = %q, want %q",
+					tt.long, tt.short, tt.args, got, tt.want)
 			}
 		})
 	}

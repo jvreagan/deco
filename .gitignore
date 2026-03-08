@@ -1,3 +1,5 @@
 deco_config.json
 *.db
 deco
+dist/
+deco_aliases.json
