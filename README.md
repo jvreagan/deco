@@ -52,6 +52,7 @@ deco clients
 | `block <MAC>` | Block a device by MAC address |
 | `unblock <MAC>` | Unblock a device by MAC address |
 | `alias` | Manage device aliases |
+| `completion <shell>` | Generate shell completion script (`bash`, `zsh`, `fish`) |
 
 ### Options
 
@@ -62,6 +63,7 @@ deco clients
 | `--force`, `-f` | Skip confirmation prompt for `purge` and `reboot` |
 | `--name`, `-n <name>` | Filter by device name — substring, case-insensitive (`clients`, `report`) |
 | `--mac`, `-m <MAC>` | Filter by MAC address — exact match, case-insensitive (`clients`, `report`) |
+| `--watch`, `-w` | Auto-refresh client list (use with `clients`) |
 
 ### Device Aliases
 
@@ -81,6 +83,7 @@ Aliases are stored in `deco_aliases.json` next to the binary and are applied in 
 deco clients --json          # JSON device list
 deco clients --name xbox     # Filter by name
 deco clients --mac AA-BB-CC-DD-EE-FF  # Filter by MAC
+deco clients --watch         # Auto-refresh every 5s
 deco poll --interval 10      # Bandwidth every 10s
 deco monitor --interval 30   # Full monitoring every 30s
 deco report today            # Today's bandwidth by device
@@ -116,6 +119,16 @@ To embed a version string:
 ```bash
 go build -ldflags "-X main.version=v1.0.0" -o deco
 ```
+
+### Shell Completion
+
+```bash
+eval "$(deco completion bash)"   # bash
+eval "$(deco completion zsh)"    # zsh
+deco completion fish | source    # fish
+```
+
+Add the appropriate line to your shell profile for persistent completion.
 
 ## How It Works
 

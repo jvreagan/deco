@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -67,6 +68,20 @@ func loadConfig() (*Config, error) {
 	return &config, nil
 }
 
+// validateConfig checks that the router is reachable with a quick TCP dial.
+func validateConfig(config *Config) error {
+	host := config.Host
+	if !strings.Contains(host, ":") {
+		host = host + ":80"
+	}
+	conn, err := net.DialTimeout("tcp", host, 3*time.Second)
+	if err != nil {
+		return fmt.Errorf("cannot reach router at %s: %v", config.Host, err)
+	}
+	conn.Close()
+	return nil
+}
+
 func NewDecoClient(host, password string) *DecoClient {
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{
@@ -88,6 +103,25 @@ func NewDecoClient(host, password string) *DecoClient {
 
 func (dc *DecoClient) baseURL() string {
 	return fmt.Sprintf("http://%s/cgi-bin/luci/;stok=%s", dc.host, dc.stok)
+}
+
+// EnsureAuthorized checks if the session is active and re-authorizes if needed.
+func (dc *DecoClient) EnsureAuthorized() error {
+	if dc.logged {
+		return nil
+	}
+	// Reset HTTP client to clear stale cookies
+	jar, _ := cookiejar.New(nil)
+	dc.client.Jar = jar
+	dc.aesKey, dc.aesIV = generateAESKeyIV()
+	return dc.Authorize()
+}
+
+// Invalidate marks the session as expired so EnsureAuthorized will re-auth.
+func (dc *DecoClient) Invalidate() {
+	dc.logged = false
+	dc.stok = ""
+	dc.sysauth = ""
 }
 
 func (dc *DecoClient) getPasswordKeys() error {
@@ -334,6 +368,13 @@ func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[
 		return nil, err
 	}
 
+	// Check for error_code in the decrypted response
+	if errCode, ok := decryptedResp["error_code"]; ok {
+		if code := toInt(errCode); code != 0 {
+			return nil, fmt.Errorf("API error code: %d", code)
+		}
+	}
+
 	// Return the result block (Deco uses 'result' not 'data')
 	if data, ok := decryptedResp["result"].(map[string]interface{}); ok {
 		return data, nil
@@ -351,7 +392,7 @@ func (dc *DecoClient) Logout() {
 
 // ==================== API METHODS ====================
 
-func (dc *DecoClient) GetClients() (map[string]interface{}, error) {
+func (dc *DecoClient) GetClients() (*ClientList, error) {
 	data, err := dc.Request("admin/client?form=client_list", map[string]interface{}{
 		"operation": "read",
 		"params":    map[string]string{"device_mac": "default"},
@@ -360,10 +401,13 @@ func (dc *DecoClient) GetClients() (map[string]interface{}, error) {
 		return nil, err
 	}
 
-	clients := []map[string]interface{}{}
+	var clients []ClientInfo
 	if clientList, ok := data["client_list"].([]interface{}); ok {
 		for _, c := range clientList {
-			client := c.(map[string]interface{})
+			client, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
 			if online, ok := client["online"].(bool); !ok || !online {
 				continue
 			}
@@ -393,30 +437,30 @@ func (dc *DecoClient) GetClients() (map[string]interface{}, error) {
 				}
 			}
 
-			clients = append(clients, map[string]interface{}{
-				"name":          name,
-				"ip":            client["ip"],
-				"mac":           client["mac"],
-				"connection":    connType,
-				"type":          client["client_type"],
-				"download_kbps": toInt(client["down_speed"]),
-				"upload_kbps":   toInt(client["up_speed"]),
+			clients = append(clients, ClientInfo{
+				Name:         name,
+				IP:           toString(client["ip"]),
+				MAC:          toString(client["mac"]),
+				Connection:   connType,
+				Type:         toString(client["client_type"]),
+				DownloadKbps: toInt(client["down_speed"]),
+				UploadKbps:   toInt(client["up_speed"]),
 			})
 		}
 	}
 
 	// Sort by IP
 	sort.Slice(clients, func(i, j int) bool {
-		return fmt.Sprintf("%v", clients[i]["ip"]) < fmt.Sprintf("%v", clients[j]["ip"])
+		return clients[i].IP < clients[j].IP
 	})
 
-	return map[string]interface{}{
-		"clients": clients,
-		"count":   len(clients),
+	return &ClientList{
+		Clients: clients,
+		Count:   len(clients),
 	}, nil
 }
 
-func (dc *DecoClient) GetNetwork() (map[string]interface{}, error) {
+func (dc *DecoClient) GetNetwork() (*NetworkInfo, error) {
 	data, err := dc.Request("admin/network?form=wan_ipv4", map[string]interface{}{"operation": "read"})
 	if err != nil {
 		return nil, err
@@ -429,47 +473,44 @@ func (dc *DecoClient) GetNetwork() (map[string]interface{}, error) {
 	wanIP := getMap(wan, "ip_info")
 	lanIP := getMap(lan, "ip_info")
 
-	result := map[string]interface{}{
-		"wan": map[string]interface{}{
-			"ip":      wanIP["ip"],
-			"gateway": wanIP["gateway"],
-			"netmask": wanIP["mask"],
-			"mac":     wanIP["mac"],
-			"dns":     []interface{}{wanIP["dns1"], wanIP["dns2"]},
+	result := &NetworkInfo{
+		WAN: WANInfo{
+			IP:      toString(wanIP["ip"]),
+			Gateway: toString(wanIP["gateway"]),
+			Netmask: toString(wanIP["mask"]),
+			MAC:     toString(wanIP["mac"]),
+			DNS:     []string{toString(wanIP["dns1"]), toString(wanIP["dns2"])},
 		},
-		"lan": map[string]interface{}{
-			"ip":      lanIP["ip"],
-			"netmask": lanIP["mask"],
-			"mac":     lanIP["mac"],
-		},
-		"performance": map[string]interface{}{
-			"cpu_percent": nil,
-			"mem_percent": nil,
+		LAN: LANInfo{
+			IP:      toString(lanIP["ip"]),
+			Netmask: toString(lanIP["mask"]),
+			MAC:     toString(lanIP["mac"]),
 		},
 	}
 
 	if perf != nil {
-		result["performance"] = map[string]interface{}{
-			"cpu_percent": perf["cpu_usage"],
-			"mem_percent": perf["mem_usage"],
+		if cpu, ok := perf["cpu_usage"]; ok && cpu != nil {
+			v := toFloat(cpu)
+			result.Performance.CPUPercent = &v
+		}
+		if mem, ok := perf["mem_usage"]; ok && mem != nil {
+			v := toFloat(mem)
+			result.Performance.MemPercent = &v
 		}
 	}
 
 	return result, nil
 }
 
-func (dc *DecoClient) GetWireless() (map[string]interface{}, error) {
+func (dc *DecoClient) GetWireless() (*WirelessInfo, error) {
 	data, err := dc.Request("admin/wireless?form=wlan", map[string]interface{}{"operation": "read"})
 	if err != nil {
 		return nil, err
 	}
 
-	bands := map[string]interface{}{}
+	bands := map[string]BandInfo{}
 
-	parseBand := func(bandData map[string]interface{}, bandName string) map[string]interface{} {
-		if bandData == nil {
-			return nil
-		}
+	parseBand := func(bandData map[string]interface{}, bandName string) BandInfo {
 		host := getMap(bandData, "host")
 		guest := getMap(bandData, "guest")
 
@@ -487,17 +528,17 @@ func (dc *DecoClient) GetWireless() (map[string]interface{}, error) {
 			}
 		}
 
-		return map[string]interface{}{
-			"band": bandName,
-			"host": map[string]interface{}{
-				"enabled":       host["enable"],
-				"ssid":          ssid,
-				"channel":       host["channel"],
-				"channel_width": host["channel_width"],
+		return BandInfo{
+			Band: bandName,
+			Host: HostInfo{
+				Enabled:      toBool(host["enable"]),
+				SSID:         ssid,
+				Channel:      toString(host["channel"]),
+				ChannelWidth: toString(host["channel_width"]),
 			},
-			"guest": map[string]interface{}{
-				"enabled": guest["enable"],
-				"ssid":    guestSSID,
+			Guest: GuestInfo{
+				Enabled: toBool(guest["enable"]),
+				SSID:    guestSSID,
 			},
 		}
 	}
@@ -512,19 +553,22 @@ func (dc *DecoClient) GetWireless() (map[string]interface{}, error) {
 		bands["6GHz"] = parseBand(b, "6GHz")
 	}
 
-	return map[string]interface{}{"bands": bands}, nil
+	return &WirelessInfo{Bands: bands}, nil
 }
 
-func (dc *DecoClient) GetMesh() (map[string]interface{}, error) {
+func (dc *DecoClient) GetMesh() (*MeshInfo, error) {
 	data, err := dc.Request("admin/device?form=device_list", map[string]interface{}{"operation": "read"})
 	if err != nil {
 		return nil, err
 	}
 
-	devices := []map[string]interface{}{}
+	var devices []MeshDevice
 	if deviceList, ok := data["device_list"].([]interface{}); ok {
 		for _, d := range deviceList {
-			dev := d.(map[string]interface{})
+			dev, ok := d.(map[string]interface{})
+			if !ok {
+				continue
+			}
 
 			name := ""
 			if n, ok := dev["custom_nickname"].(string); ok && n != "" {
@@ -538,21 +582,21 @@ func (dc *DecoClient) GetMesh() (map[string]interface{}, error) {
 				}
 			}
 
-			devices = append(devices, map[string]interface{}{
-				"name":     name,
-				"model":    dev["device_model"],
-				"role":     dev["role"],
-				"ip":       dev["device_ip"],
-				"mac":      dev["mac"],
-				"firmware": dev["software_ver"],
-				"status":   dev["inet_status"],
+			devices = append(devices, MeshDevice{
+				Name:     name,
+				Model:    toString(dev["device_model"]),
+				Role:     toString(dev["role"]),
+				IP:       toString(dev["device_ip"]),
+				MAC:      toString(dev["mac"]),
+				Firmware: toString(dev["software_ver"]),
+				Status:   toString(dev["inet_status"]),
 			})
 		}
 	}
 
-	return map[string]interface{}{
-		"devices": devices,
-		"count":   len(devices),
+	return &MeshInfo{
+		Devices: devices,
+		Count:   len(devices),
 	}, nil
 }
 

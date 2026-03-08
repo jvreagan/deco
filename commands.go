@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -66,9 +67,14 @@ func runVersion() {
 	fmt.Println(version)
 }
 
-func runClients(jsonOut bool) {
+func connectClient() (*DecoClient, *Config) {
 	config, err := loadConfig()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := validateConfig(config); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -78,6 +84,12 @@ func runClients(jsonOut bool) {
 		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
 		os.Exit(1)
 	}
+
+	return client, config
+}
+
+func runClients(jsonOut bool) {
+	client, _ := connectClient()
 	defer client.Logout()
 
 	data, err := client.GetClients()
@@ -100,18 +112,68 @@ func runClients(jsonOut bool) {
 	}
 }
 
-func runNetwork(jsonOut bool) {
+func runWatch(interval int) {
 	config, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	client := NewDecoClient(config.Host, config.Password)
-	if err := client.Authorize(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
+	if err := validateConfig(config); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	nameFilter := getFlagString("--name", "-n")
+	macFilter := getFlagString("--mac", "-m")
+
+	client := NewDecoClient(config.Host, config.Password)
+	defer client.Logout()
+
+	for {
+		if err := client.EnsureAuthorized(); err != nil {
+			fmt.Printf("\033[2J\033[HError connecting: %v, retrying...\n", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(interval) * time.Second):
+				continue
+			}
+		}
+
+		data, err := client.GetClients()
+		if err != nil {
+			client.Invalidate()
+			fmt.Printf("\033[2J\033[HError: %v, retrying...\n", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(interval) * time.Second):
+				continue
+			}
+		}
+
+		if nameFilter != "" || macFilter != "" {
+			data = filterClients(data, nameFilter, macFilter)
+		}
+
+		fmt.Print("\033[2J\033[H")
+		fmt.Printf("Watching clients (every %ds) — %s — Press Ctrl+C to stop\n", interval, time.Now().Format("15:04:05"))
+		printClientsTable(data)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Duration(interval) * time.Second):
+		}
+	}
+}
+
+func runNetwork(jsonOut bool) {
+	client, _ := connectClient()
 	defer client.Logout()
 
 	data, err := client.GetNetwork()
@@ -128,17 +190,7 @@ func runNetwork(jsonOut bool) {
 }
 
 func runWireless(jsonOut bool) {
-	config, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	client := NewDecoClient(config.Host, config.Password)
-	if err := client.Authorize(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
-		os.Exit(1)
-	}
+	client, _ := connectClient()
 	defer client.Logout()
 
 	data, err := client.GetWireless()
@@ -155,17 +207,7 @@ func runWireless(jsonOut bool) {
 }
 
 func runMesh(jsonOut bool) {
-	config, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	client := NewDecoClient(config.Host, config.Password)
-	if err := client.Authorize(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
-		os.Exit(1)
-	}
+	client, _ := connectClient()
 	defer client.Logout()
 
 	data, err := client.GetMesh()
@@ -182,17 +224,7 @@ func runMesh(jsonOut bool) {
 }
 
 func runAll() {
-	config, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	client := NewDecoClient(config.Host, config.Password)
-	if err := client.Authorize(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
-		os.Exit(1)
-	}
+	client, config := connectClient()
 	defer client.Logout()
 
 	network, _ := client.GetNetwork()
@@ -200,30 +232,20 @@ func runAll() {
 	mesh, _ := client.GetMesh()
 	clients, _ := client.GetClients()
 
-	data := map[string]interface{}{
-		"timestamp": time.Now().Format(time.RFC3339),
-		"router":    config.Host,
-		"network":   network,
-		"wireless":  wireless,
-		"mesh":      mesh,
-		"clients":   clients,
+	data := AllInfo{
+		Timestamp: time.Now().Format(time.RFC3339),
+		Router:    config.Host,
+		Network:   network,
+		Wireless:  wireless,
+		Mesh:      mesh,
+		Clients:   clients,
 	}
 
 	printJSON(data)
 }
 
 func runAPI(endpoint, body string) {
-	config, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	client := NewDecoClient(config.Host, config.Password)
-	if err := client.Authorize(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
-		os.Exit(1)
-	}
+	client, _ := connectClient()
 	defer client.Logout()
 
 	var reqData map[string]interface{}
@@ -251,14 +273,7 @@ func runPoll(interval int) {
 
 	ok, size := checkDBSizeLimit()
 	if !ok {
-		fmt.Println(strings.Repeat("=", 70))
-		fmt.Println("ERROR: DATABASE SIZE LIMIT EXCEEDED")
-		fmt.Println(strings.Repeat("=", 70))
-		fmt.Printf("Current size: %s\n", formatSize(size))
-		fmt.Printf("Limit:        %s\n", formatSize(DBSizeLimitBytes))
-		fmt.Println("\nPolling cannot continue. Please run 'purge' to clear the database:")
-		fmt.Println("  deco purge")
-		fmt.Println(strings.Repeat("=", 70))
+		printDBLimitError(size, "Polling")
 		os.Exit(1)
 	}
 
@@ -273,61 +288,51 @@ func runPoll(interval int) {
 	fmt.Printf("DB Size:  %s / %s limit\n", formatSize(size), formatSize(DBSizeLimitBytes))
 	fmt.Println("Press Ctrl+C to stop")
 
-	// Handle signals
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
-	running := true
 	sampleCount := 0
 
-	go func() {
-		<-sigChan
-		fmt.Println("\nStopping monitor...")
-		running = false
-	}()
+	client := NewDecoClient(config.Host, config.Password)
+	defer client.Logout()
 
-	for running {
-		// Check size limit
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Printf("\nMonitor stopped. Recorded %d samples.\n", sampleCount)
+			return
+		default:
+		}
+
 		ok, size := checkDBSizeLimit()
 		if !ok {
-			fmt.Println(strings.Repeat("=", 70))
-			fmt.Println("ERROR: DATABASE SIZE LIMIT EXCEEDED")
-			fmt.Println(strings.Repeat("=", 70))
-			fmt.Printf("Current size: %s\n", formatSize(size))
-			fmt.Printf("Limit:        %s\n", formatSize(DBSizeLimitBytes))
-			fmt.Println("\nPolling stopped. Please run 'purge' to clear the database:")
-			fmt.Println("  deco purge")
-			fmt.Println(strings.Repeat("=", 70))
+			printDBLimitError(size, "Polling")
 			return
 		}
 
 		start := time.Now()
 
-		client := NewDecoClient(config.Host, config.Password)
-		if err := client.Authorize(); err != nil {
+		if err := client.EnsureAuthorized(); err != nil {
 			fmt.Printf("Error connecting: %v, retrying...\n", err)
-			time.Sleep(time.Duration(interval) * time.Second)
+			waitOrCancel(ctx, interval)
 			continue
 		}
 
 		data, err := client.GetClients()
-		client.Logout()
-
 		if err != nil {
+			client.Invalidate()
 			fmt.Printf("Error getting clients: %v, retrying...\n", err)
-			time.Sleep(time.Duration(interval) * time.Second)
+			waitOrCancel(ctx, interval)
 			continue
 		}
 
-		clients := data["clients"].([]map[string]interface{})
 		timestamp := time.Now().Format(time.RFC3339)
 
-		// Record samples
-		for _, c := range clients {
+		for _, c := range data.Clients {
 			_, err := db.Exec(`
 				INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			`, timestamp, c["mac"], c["name"], c["ip"], c["connection"], c["type"], c["download_kbps"], c["upload_kbps"])
+			`, timestamp, c.MAC, c.Name, c.IP, c.Connection, c.Type, c.DownloadKbps, c.UploadKbps)
 			if err != nil {
 				fmt.Printf("DB error: %v\n", err)
 			}
@@ -335,33 +340,32 @@ func runPoll(interval int) {
 
 		sampleCount++
 
-		// Show activity
 		activeCount := 0
 		totalDown := 0
 		totalUp := 0
-		for _, c := range clients {
-			down := toInt(c["download_kbps"])
-			up := toInt(c["upload_kbps"])
-			if down > 0 || up > 0 {
+		for _, c := range data.Clients {
+			if c.DownloadKbps > 0 || c.UploadKbps > 0 {
 				activeCount++
 			}
-			totalDown += down
-			totalUp += up
+			totalDown += c.DownloadKbps
+			totalUp += c.UploadKbps
 		}
 
 		ts := time.Now().Format("15:04:05")
 		fmt.Printf("[%s] Sample #%d: %d clients, %d active, %d KB/s down %d KB/s up\n",
-			ts, sampleCount, len(clients), activeCount, totalDown, totalUp)
+			ts, sampleCount, len(data.Clients), activeCount, totalDown, totalUp)
 
-		// Wait for next interval
 		elapsed := time.Since(start)
 		sleepTime := time.Duration(interval)*time.Second - elapsed
-		if sleepTime > 0 && running {
-			time.Sleep(sleepTime)
+		if sleepTime > 0 {
+			select {
+			case <-ctx.Done():
+				fmt.Printf("\nMonitor stopped. Recorded %d samples.\n", sampleCount)
+				return
+			case <-time.After(sleepTime):
+			}
 		}
 	}
-
-	fmt.Printf("Monitor stopped. Recorded %d samples.\n", sampleCount)
 }
 
 func runMonitor(interval int) {
@@ -374,14 +378,7 @@ func runMonitor(interval int) {
 
 	ok, size := checkDBSizeLimit()
 	if !ok {
-		fmt.Println(strings.Repeat("=", 70))
-		fmt.Println("ERROR: DATABASE SIZE LIMIT EXCEEDED")
-		fmt.Println(strings.Repeat("=", 70))
-		fmt.Printf("Current size: %s\n", formatSize(size))
-		fmt.Printf("Limit:        %s\n", formatSize(DBSizeLimitBytes))
-		fmt.Println("\nMonitoring cannot continue. Please run 'purge' to clear the database:")
-		fmt.Println("  deco purge")
-		fmt.Println(strings.Repeat("=", 70))
+		printDBLimitError(size, "Monitoring")
 		os.Exit(1)
 	}
 
@@ -396,38 +393,33 @@ func runMonitor(interval int) {
 	fmt.Printf("DB Size:  %s / %s limit\n", formatSize(size), formatSize(DBSizeLimitBytes))
 	fmt.Println("Press Ctrl+C to stop")
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
-	running := true
 	cycleCount := 0
 
-	go func() {
-		<-sigChan
-		fmt.Println("\nStopping monitor...")
-		running = false
-	}()
+	client := NewDecoClient(config.Host, config.Password)
+	defer client.Logout()
 
-	for running {
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Printf("\nMonitor stopped. Completed %d cycles.\n", cycleCount)
+			return
+		default:
+		}
+
 		ok, size := checkDBSizeLimit()
 		if !ok {
-			fmt.Println(strings.Repeat("=", 70))
-			fmt.Println("ERROR: DATABASE SIZE LIMIT EXCEEDED")
-			fmt.Println(strings.Repeat("=", 70))
-			fmt.Printf("Current size: %s\n", formatSize(size))
-			fmt.Printf("Limit:        %s\n", formatSize(DBSizeLimitBytes))
-			fmt.Println("\nMonitoring stopped. Please run 'purge' to clear the database:")
-			fmt.Println("  deco purge")
-			fmt.Println(strings.Repeat("=", 70))
+			printDBLimitError(size, "Monitoring")
 			return
 		}
 
 		start := time.Now()
 
-		client := NewDecoClient(config.Host, config.Password)
-		if err := client.Authorize(); err != nil {
+		if err := client.EnsureAuthorized(); err != nil {
 			fmt.Printf("[%s] Error connecting: %v, retrying next cycle...\n", time.Now().Format("15:04:05"), err)
-			time.Sleep(time.Duration(interval) * time.Second)
+			waitOrCancel(ctx, interval)
 			continue
 		}
 
@@ -435,101 +427,83 @@ func runMonitor(interval int) {
 		networkData, networkErr := client.GetNetwork()
 		wirelessData, wirelessErr := client.GetWireless()
 		meshData, meshErr := client.GetMesh()
-		client.Logout()
+
+		// If all requests failed, session is probably dead
+		if clientErr != nil && networkErr != nil && wirelessErr != nil && meshErr != nil {
+			client.Invalidate()
+		}
 
 		timestamp := time.Now().Format(time.RFC3339)
 		cycleCount++
 
-		// Insert bandwidth_samples (same as poll)
 		clientCount := 0
 		if clientErr == nil {
-			if clients, ok := clientData["clients"].([]map[string]interface{}); ok {
-				clientCount = len(clients)
-				for _, c := range clients {
-					db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-						timestamp, c["mac"], c["name"], c["ip"], c["connection"], c["type"], c["download_kbps"], c["upload_kbps"])
-				}
+			clientCount = len(clientData.Clients)
+			for _, c := range clientData.Clients {
+				db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					timestamp, c.MAC, c.Name, c.IP, c.Connection, c.Type, c.DownloadKbps, c.UploadKbps)
 			}
 		} else {
 			fmt.Printf("[%s] Error getting clients: %v\n", time.Now().Format("15:04:05"), clientErr)
 		}
 
-		// Insert network_snapshot
-		var cpuPct, memPct interface{}
+		var cpuPct, memPct *float64
 		if networkErr == nil {
-			wan := getMap(networkData, "wan")
-			lan := getMap(networkData, "lan")
-			perf := getMap(networkData, "performance")
+			cpuPct = networkData.Performance.CPUPercent
+			memPct = networkData.Performance.MemPercent
 
-			cpuPct = perf["cpu_percent"]
-			memPct = perf["mem_percent"]
-
-			var dns1, dns2 interface{}
-			if dnsSlice, ok := wan["dns"].([]interface{}); ok && len(dnsSlice) >= 2 {
-				dns1 = dnsSlice[0]
-				dns2 = dnsSlice[1]
+			var dns1, dns2 string
+			if len(networkData.WAN.DNS) >= 2 {
+				dns1 = networkData.WAN.DNS[0]
+				dns2 = networkData.WAN.DNS[1]
 			}
 
 			db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				timestamp, wan["ip"], wan["gateway"], dns1, dns2, lan["ip"], lan["netmask"], cpuPct, memPct)
+				timestamp, networkData.WAN.IP, networkData.WAN.Gateway, dns1, dns2, networkData.LAN.IP, networkData.LAN.Netmask, cpuPct, memPct)
 		} else {
 			fmt.Printf("[%s] Error getting network: %v\n", time.Now().Format("15:04:05"), networkErr)
 		}
 
-		// Insert mesh_snapshots
 		meshCount := 0
 		if meshErr == nil {
-			if devices, ok := meshData["devices"].([]map[string]interface{}); ok {
-				meshCount = len(devices)
-				for _, d := range devices {
-					db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-						timestamp, d["name"], d["role"], d["ip"], d["mac"], d["model"], d["firmware"], d["status"])
-				}
+			meshCount = len(meshData.Devices)
+			for _, d := range meshData.Devices {
+				db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					timestamp, d.Name, d.Role, d.IP, d.MAC, d.Model, d.Firmware, d.Status)
 			}
 		} else {
 			fmt.Printf("[%s] Error getting mesh: %v\n", time.Now().Format("15:04:05"), meshErr)
 		}
 
-		// Insert wireless_snapshots
 		if wirelessErr == nil {
-			if bands, ok := wirelessData["bands"].(map[string]interface{}); ok {
-				for bandName, b := range bands {
-					if b == nil {
-						continue
-					}
-					band := b.(map[string]interface{})
-					host := getMap(band, "host")
-					guest := getMap(band, "guest")
-
-					hostEnabled := 0
-					if e, ok := host["enabled"].(bool); ok && e {
-						hostEnabled = 1
-					}
-					guestEnabled := 0
-					if e, ok := guest["enabled"].(bool); ok && e {
-						guestEnabled = 1
-					}
-
-					db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-						timestamp, bandName, host["ssid"], host["channel"], host["channel_width"], hostEnabled, guestEnabled, guest["ssid"])
+			for bandName, band := range wirelessData.Bands {
+				hostEnabled := 0
+				if band.Host.Enabled {
+					hostEnabled = 1
 				}
+				guestEnabled := 0
+				if band.Guest.Enabled {
+					guestEnabled = 1
+				}
+
+				db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+					timestamp, bandName, band.Host.SSID, band.Host.Channel, band.Host.ChannelWidth, hostEnabled, guestEnabled, band.Guest.SSID)
 			}
 		} else {
 			fmt.Printf("[%s] Error getting wireless: %v\n", time.Now().Format("15:04:05"), wirelessErr)
 		}
 
-		// Print summary line
 		cpuStr := "?"
 		memStr := "?"
 		if cpuPct != nil {
-			cpuStr = fmt.Sprintf("%.0f%%", toFloat(cpuPct))
+			cpuStr = fmt.Sprintf("%.0f%%", *cpuPct)
 		}
 		if memPct != nil {
-			memStr = fmt.Sprintf("%.0f%%", toFloat(memPct))
+			memStr = fmt.Sprintf("%.0f%%", *memPct)
 		}
 
 		ts := time.Now().Format("15:04:05")
@@ -538,12 +512,15 @@ func runMonitor(interval int) {
 
 		elapsed := time.Since(start)
 		sleepTime := time.Duration(interval)*time.Second - elapsed
-		if sleepTime > 0 && running {
-			time.Sleep(sleepTime)
+		if sleepTime > 0 {
+			select {
+			case <-ctx.Done():
+				fmt.Printf("\nMonitor stopped. Completed %d cycles.\n", cycleCount)
+				return
+			case <-time.After(sleepTime):
+			}
 		}
 	}
-
-	fmt.Printf("Monitor stopped. Completed %d cycles.\n", cycleCount)
 }
 
 func runReport(period string, jsonOut bool) {
@@ -591,7 +568,7 @@ func runReport(period string, jsonOut bool) {
 	}
 	defer rows.Close()
 
-	devices := []map[string]interface{}{}
+	var devices []ReportDevice
 	for rows.Next() {
 		var mac, name, ip, connection, deviceType sql.NullString
 		var sampleCount, totalDown, totalUp, maxDown, maxUp int64
@@ -602,35 +579,39 @@ func runReport(period string, jsonOut bool) {
 			continue
 		}
 
-		devices = append(devices, map[string]interface{}{
-			"mac":            mac.String,
-			"name":           name.String,
-			"ip":             ip.String,
-			"connection":     connection.String,
-			"device_type":    deviceType.String,
-			"sample_count":   sampleCount,
-			"total_download": totalDown,
-			"total_upload":   totalUp,
-			"max_download":   maxDown,
-			"max_upload":     maxUp,
+		devices = append(devices, ReportDevice{
+			MAC:           mac.String,
+			Name:          name.String,
+			IP:            ip.String,
+			Connection:    connection.String,
+			DeviceType:    deviceType.String,
+			SampleCount:   sampleCount,
+			TotalDownload: totalDown,
+			TotalUpload:   totalUp,
+			MaxDownload:   maxDown,
+			MaxUpload:     maxUp,
 		})
 	}
 
-	// Apply filters
+	// Apply filters (check aliases too)
 	nameFilter := getFlagString("--name", "-n")
 	macFilter := getFlagString("--mac", "-m")
 	if nameFilter != "" || macFilter != "" {
-		filtered := []map[string]interface{}{}
+		aliases := loadAliases()
+		var filtered []ReportDevice
 		for _, d := range devices {
 			if nameFilter != "" {
-				name := strings.ToLower(fmt.Sprintf("%v", d["name"]))
+				name := strings.ToLower(d.Name)
+				// Also check alias
+				if alias, ok := aliases[strings.ToUpper(d.MAC)]; ok {
+					name = strings.ToLower(alias)
+				}
 				if !strings.Contains(name, strings.ToLower(nameFilter)) {
 					continue
 				}
 			}
 			if macFilter != "" {
-				mac := strings.ToLower(fmt.Sprintf("%v", d["mac"]))
-				if mac != strings.ToLower(macFilter) {
+				if !strings.EqualFold(d.MAC, macFilter) {
 					continue
 				}
 			}
@@ -639,28 +620,25 @@ func runReport(period string, jsonOut bool) {
 		devices = filtered
 	}
 
-	// Get total samples
 	var totalSamples int64
 	db.QueryRow("SELECT COUNT(DISTINCT timestamp) FROM bandwidth_samples WHERE timestamp >= ?",
 		startTime.Format(time.RFC3339)).Scan(&totalSamples)
 
-	report := map[string]interface{}{
-		"period":           periodName,
-		"start_time":       startTime.Format(time.RFC3339),
-		"query_time":       time.Now().Format(time.RFC3339),
-		"interval_seconds": 5,
-		"total_samples":    totalSamples,
-		"devices":          devices,
+	report := &Report{
+		Period:          periodName,
+		StartTime:       startTime.Format(time.RFC3339),
+		QueryTime:       time.Now().Format(time.RFC3339),
+		IntervalSeconds: 5,
+		TotalSamples:    totalSamples,
+		Devices:         devices,
 	}
 
 	if jsonOut {
-		// Add calculated totals for JSON
-		for _, d := range devices {
-			totalDown := d["total_download"].(int64)
-			totalUp := d["total_upload"].(int64)
-			d["download_kb"] = totalDown * 5
-			d["upload_kb"] = totalUp * 5
-			d["total_kb"] = (totalDown + totalUp) * 5
+		for i := range report.Devices {
+			d := &report.Devices[i]
+			d.DownloadKB = d.TotalDownload * 5
+			d.UploadKB = d.TotalUpload * 5
+			d.TotalKB = (d.TotalDownload + d.TotalUpload) * 5
 		}
 		printJSON(report)
 	} else {
@@ -754,17 +732,7 @@ func runReboot() {
 		}
 	}
 
-	config, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	client := NewDecoClient(config.Host, config.Password)
-	if err := client.Authorize(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
-		os.Exit(1)
-	}
+	client, _ := connectClient()
 	defer client.Logout()
 
 	if err := client.Reboot(); err != nil {
@@ -776,17 +744,7 @@ func runReboot() {
 }
 
 func runBlock(mac string) {
-	config, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	client := NewDecoClient(config.Host, config.Password)
-	if err := client.Authorize(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
-		os.Exit(1)
-	}
+	client, _ := connectClient()
 	defer client.Logout()
 
 	if err := client.BlockClient(mac); err != nil {
@@ -798,17 +756,7 @@ func runBlock(mac string) {
 }
 
 func runUnblock(mac string) {
-	config, err := loadConfig()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	client := NewDecoClient(config.Host, config.Password)
-	if err := client.Authorize(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
-		os.Exit(1)
-	}
+	client, _ := connectClient()
 	defer client.Logout()
 
 	if err := client.UnblockClient(mac); err != nil {
@@ -867,6 +815,20 @@ func runAlias() {
 	fmt.Printf("Set alias: %s -> %s\n", mac, name)
 }
 
+func runCompletion(shell string) {
+	switch shell {
+	case "bash":
+		fmt.Print(bashCompletion)
+	case "zsh":
+		fmt.Print(zshCompletion)
+	case "fish":
+		fmt.Print(fishCompletion)
+	default:
+		fmt.Fprintf(os.Stderr, "Unsupported shell: %s (use bash, zsh, or fish)\n", shell)
+		os.Exit(1)
+	}
+}
+
 func loadAliases() map[string]string {
 	exe, _ := os.Executable()
 	aliasPath := filepath.Join(filepath.Dir(exe), "deco_aliases.json")
@@ -904,36 +866,156 @@ func saveAliases(aliases map[string]string) {
 	}
 }
 
-func filterClients(data map[string]interface{}, nameFilter, macFilter string) map[string]interface{} {
-	clients := data["clients"].([]map[string]interface{})
-	filtered := []map[string]interface{}{}
-
+func filterClients(data *ClientList, nameFilter, macFilter string) *ClientList {
+	var filtered []ClientInfo
 	aliases := loadAliases()
 
-	for _, c := range clients {
+	for _, c := range data.Clients {
 		if nameFilter != "" {
-			name := strings.ToLower(fmt.Sprintf("%v", c["name"]))
-			// Also check alias
-			if mac, ok := c["mac"].(string); ok {
-				if alias, ok := aliases[strings.ToUpper(mac)]; ok {
-					name = strings.ToLower(alias)
-				}
+			name := strings.ToLower(c.Name)
+			if alias, ok := aliases[strings.ToUpper(c.MAC)]; ok {
+				name = strings.ToLower(alias)
 			}
 			if !strings.Contains(name, strings.ToLower(nameFilter)) {
 				continue
 			}
 		}
 		if macFilter != "" {
-			mac := strings.ToLower(fmt.Sprintf("%v", c["mac"]))
-			if mac != strings.ToLower(macFilter) {
+			if !strings.EqualFold(c.MAC, macFilter) {
 				continue
 			}
 		}
 		filtered = append(filtered, c)
 	}
 
-	return map[string]interface{}{
-		"clients": filtered,
-		"count":   len(filtered),
+	return &ClientList{
+		Clients: filtered,
+		Count:   len(filtered),
 	}
 }
+
+func waitOrCancel(ctx context.Context, seconds int) {
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Duration(seconds) * time.Second):
+	}
+}
+
+func printDBLimitError(size int64, action string) {
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Println("ERROR: DATABASE SIZE LIMIT EXCEEDED")
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Printf("Current size: %s\n", formatSize(size))
+	fmt.Printf("Limit:        %s\n", formatSize(DBSizeLimitBytes))
+	fmt.Printf("\n%s cannot continue. Please run 'purge' to clear the database:\n", action)
+	fmt.Println("  deco purge")
+	fmt.Println(strings.Repeat("=", 70))
+}
+
+// ==================== COMPLETION SCRIPTS ====================
+
+const bashCompletion = `_deco_completions() {
+    local commands="clients network wireless mesh all poll monitor report status purge setup api version reboot block unblock alias completion"
+    local cur="${COMP_WORDS[COMP_CWORD]}"
+    local prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    case "$prev" in
+        report)
+            COMPREPLY=($(compgen -W "today hour all" -- "$cur"))
+            return
+            ;;
+        completion)
+            COMPREPLY=($(compgen -W "bash zsh fish" -- "$cur"))
+            return
+            ;;
+    esac
+
+    if [[ ${COMP_CWORD} -eq 1 ]]; then
+        COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+    else
+        COMPREPLY=($(compgen -W "--json -j --interval -i --force -f --name -n --mac -m --watch -w --remove -r" -- "$cur"))
+    fi
+}
+complete -F _deco_completions deco
+`
+
+const zshCompletion = `#compdef deco
+
+_deco() {
+    local -a commands
+    commands=(
+        'clients:List connected devices'
+        'network:Show WAN/LAN configuration'
+        'wireless:Show WiFi configuration'
+        'mesh:Show mesh topology'
+        'all:Complete network snapshot'
+        'poll:Start bandwidth monitoring'
+        'monitor:Full network monitoring'
+        'report:Show usage report'
+        'status:Show database statistics'
+        'purge:Delete all records'
+        'setup:Interactive configuration'
+        'api:Call a raw API endpoint'
+        'version:Show version'
+        'reboot:Reboot the router'
+        'block:Block a device'
+        'unblock:Unblock a device'
+        'alias:Manage device aliases'
+        'completion:Generate shell completion'
+    )
+
+    _arguments '1:command:->cmds' '*:options:->opts'
+
+    case "$state" in
+        cmds)
+            _describe 'command' commands
+            ;;
+        opts)
+            _arguments \
+                '--json[Output as JSON]' \
+                '-j[Output as JSON]' \
+                '--interval[Polling interval]:seconds:' \
+                '-i[Polling interval]:seconds:' \
+                '--force[Skip confirmation]' \
+                '-f[Skip confirmation]' \
+                '--name[Filter by name]:name:' \
+                '-n[Filter by name]:name:' \
+                '--mac[Filter by MAC]:mac:' \
+                '-m[Filter by MAC]:mac:' \
+                '--watch[Auto-refresh display]' \
+                '-w[Auto-refresh display]'
+            ;;
+    esac
+}
+
+_deco "$@"
+`
+
+const fishCompletion = `complete -c deco -f
+complete -c deco -n '__fish_use_subcommand' -a 'clients' -d 'List connected devices'
+complete -c deco -n '__fish_use_subcommand' -a 'network' -d 'Show WAN/LAN configuration'
+complete -c deco -n '__fish_use_subcommand' -a 'wireless' -d 'Show WiFi configuration'
+complete -c deco -n '__fish_use_subcommand' -a 'mesh' -d 'Show mesh topology'
+complete -c deco -n '__fish_use_subcommand' -a 'all' -d 'Complete network snapshot'
+complete -c deco -n '__fish_use_subcommand' -a 'poll' -d 'Start bandwidth monitoring'
+complete -c deco -n '__fish_use_subcommand' -a 'monitor' -d 'Full network monitoring'
+complete -c deco -n '__fish_use_subcommand' -a 'report' -d 'Show usage report'
+complete -c deco -n '__fish_use_subcommand' -a 'status' -d 'Show database statistics'
+complete -c deco -n '__fish_use_subcommand' -a 'purge' -d 'Delete all records'
+complete -c deco -n '__fish_use_subcommand' -a 'setup' -d 'Interactive configuration'
+complete -c deco -n '__fish_use_subcommand' -a 'api' -d 'Call a raw API endpoint'
+complete -c deco -n '__fish_use_subcommand' -a 'version' -d 'Show version'
+complete -c deco -n '__fish_use_subcommand' -a 'reboot' -d 'Reboot the router'
+complete -c deco -n '__fish_use_subcommand' -a 'block' -d 'Block a device'
+complete -c deco -n '__fish_use_subcommand' -a 'unblock' -d 'Unblock a device'
+complete -c deco -n '__fish_use_subcommand' -a 'alias' -d 'Manage device aliases'
+complete -c deco -n '__fish_use_subcommand' -a 'completion' -d 'Generate shell completion'
+complete -c deco -n '__fish_seen_subcommand_from report' -a 'today hour all'
+complete -c deco -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
+complete -c deco -l json -s j -d 'Output as JSON'
+complete -c deco -l interval -s i -d 'Polling interval' -r
+complete -c deco -l force -s f -d 'Skip confirmation'
+complete -c deco -l name -s n -d 'Filter by name' -r
+complete -c deco -l mac -s m -d 'Filter by MAC' -r
+complete -c deco -l watch -s w -d 'Auto-refresh display'
+`

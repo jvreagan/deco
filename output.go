@@ -11,22 +11,17 @@ func printJSON(data interface{}) {
 	fmt.Println(string(out))
 }
 
-func printClientsTable(data map[string]interface{}) {
-	clients := data["clients"].([]map[string]interface{})
-
+func printClientsTable(data *ClientList) {
 	aliases := loadAliases()
 
 	fmt.Printf("\n%-25s %-16s %-18s %-14s %-12s %-8s %-8s\n",
 		"NAME", "IP", "MAC", "CONNECTION", "TYPE", "DOWN", "UP")
 	fmt.Println(strings.Repeat("-", 110))
 
-	for _, c := range clients {
-		name := fmt.Sprintf("%v", c["name"])
-		// Apply alias if one exists
-		if mac, ok := c["mac"].(string); ok {
-			if alias, ok := aliases[strings.ToUpper(mac)]; ok {
-				name = alias
-			}
+	for _, c := range data.Clients {
+		name := c.Name
+		if alias, ok := aliases[strings.ToUpper(c.MAC)]; ok {
+			name = alias
 		}
 		if len(name) > 24 {
 			name = name[:24]
@@ -34,100 +29,92 @@ func printClientsTable(data map[string]interface{}) {
 
 		down := "-"
 		up := "-"
-		if d := toInt(c["download_kbps"]); d > 0 {
-			down = fmt.Sprintf("%dKB/s", d)
+		if c.DownloadKbps > 0 {
+			down = fmt.Sprintf("%dKB/s", c.DownloadKbps)
 		}
-		if u := toInt(c["upload_kbps"]); u > 0 {
-			up = fmt.Sprintf("%dKB/s", u)
+		if c.UploadKbps > 0 {
+			up = fmt.Sprintf("%dKB/s", c.UploadKbps)
 		}
 
-		fmt.Printf("%-25s %-16v %-18v %-14v %-12v %-8s %-8s\n",
-			name, c["ip"], c["mac"], c["connection"], c["type"], down, up)
+		fmt.Printf("%-25s %-16s %-18s %-14s %-12s %-8s %-8s\n",
+			name, c.IP, c.MAC, c.Connection, c.Type, down, up)
 	}
 
-	fmt.Printf("\nTotal: %v clients\n", data["count"])
+	fmt.Printf("\nTotal: %d clients\n", data.Count)
 }
 
-func printNetworkTable(data map[string]interface{}) {
-	wan := data["wan"].(map[string]interface{})
-	lan := data["lan"].(map[string]interface{})
-	perf := data["performance"].(map[string]interface{})
-
+func printNetworkTable(data *NetworkInfo) {
 	fmt.Println("\n=== WAN ===")
-	fmt.Printf("  IP:      %v\n", wan["ip"])
-	fmt.Printf("  Gateway: %v\n", wan["gateway"])
-	fmt.Printf("  Netmask: %v\n", wan["netmask"])
-	fmt.Printf("  MAC:     %v\n", wan["mac"])
+	fmt.Printf("  IP:      %s\n", data.WAN.IP)
+	fmt.Printf("  Gateway: %s\n", data.WAN.Gateway)
+	fmt.Printf("  Netmask: %s\n", data.WAN.Netmask)
+	fmt.Printf("  MAC:     %s\n", data.WAN.MAC)
 
 	fmt.Println("\n=== LAN ===")
-	fmt.Printf("  IP:      %v\n", lan["ip"])
-	fmt.Printf("  Netmask: %v\n", lan["netmask"])
-	fmt.Printf("  MAC:     %v\n", lan["mac"])
+	fmt.Printf("  IP:      %s\n", data.LAN.IP)
+	fmt.Printf("  Netmask: %s\n", data.LAN.Netmask)
+	fmt.Printf("  MAC:     %s\n", data.LAN.MAC)
 
 	fmt.Println("\n=== Performance ===")
-	fmt.Printf("  CPU:    %v%%\n", perf["cpu_percent"])
-	fmt.Printf("  Memory: %v%%\n", perf["mem_percent"])
+	if data.Performance.CPUPercent != nil {
+		fmt.Printf("  CPU:    %.0f%%\n", *data.Performance.CPUPercent)
+	} else {
+		fmt.Println("  CPU:    N/A")
+	}
+	if data.Performance.MemPercent != nil {
+		fmt.Printf("  Memory: %.0f%%\n", *data.Performance.MemPercent)
+	} else {
+		fmt.Println("  Memory: N/A")
+	}
 }
 
-func printWirelessTable(data map[string]interface{}) {
-	bands := data["bands"].(map[string]interface{})
-
+func printWirelessTable(data *WirelessInfo) {
 	fmt.Print("\n=== Wireless Networks ===\n\n")
-	for bandName, b := range bands {
-		if b == nil {
-			continue
-		}
-		band := b.(map[string]interface{})
-		host := band["host"].(map[string]interface{})
-		guest := band["guest"].(map[string]interface{})
-
+	for bandName, band := range data.Bands {
 		status := "x"
-		if enabled, ok := host["enabled"].(bool); ok && enabled {
+		if band.Host.Enabled {
 			status = "o"
 		}
-		fmt.Printf("[%s] %s: %v\n", status, bandName, host["ssid"])
-		fmt.Printf("    Channel: %v | Width: %v\n", host["channel"], host["channel_width"])
+		fmt.Printf("[%s] %s: %s\n", status, bandName, band.Host.SSID)
+		fmt.Printf("    Channel: %s | Width: %s\n", band.Host.Channel, band.Host.ChannelWidth)
 
-		if enabled, ok := guest["enabled"].(bool); ok && enabled {
-			fmt.Printf("    Guest: %v\n", guest["ssid"])
+		if band.Guest.Enabled {
+			fmt.Printf("    Guest: %s\n", band.Guest.SSID)
 		}
 		fmt.Println()
 	}
 }
 
-func printMeshTable(data map[string]interface{}) {
-	devices := data["devices"].([]map[string]interface{})
-
-	fmt.Printf("\n=== Mesh Devices (%v) ===\n\n", data["count"])
-	for _, d := range devices {
+func printMeshTable(data *MeshInfo) {
+	fmt.Printf("\n=== Mesh Devices (%d) ===\n\n", data.Count)
+	for _, d := range data.Devices {
 		role := "  "
-		if d["role"] == "master" {
+		if d.Role == "master" {
 			role = "* "
 		}
-		fmt.Printf("%s%v (%v)\n", role, d["name"], d["model"])
-		fmt.Printf("    Role: %v | IP: %v | MAC: %v\n", d["role"], d["ip"], d["mac"])
-		fmt.Printf("    Firmware: %v | Status: %v\n", d["firmware"], d["status"])
+		fmt.Printf("%s%s (%s)\n", role, d.Name, d.Model)
+		fmt.Printf("    Role: %s | IP: %s | MAC: %s\n", d.Role, d.IP, d.MAC)
+		fmt.Printf("    Firmware: %s | Status: %s\n", d.Firmware, d.Status)
 		fmt.Println()
 	}
 }
 
-func printReport(report map[string]interface{}) {
+func printReport(report *Report) {
 	aliases := loadAliases()
 
 	fmt.Println(strings.Repeat("=", 70))
-	fmt.Printf("BANDWIDTH USAGE REPORT - %v\n", report["period"])
+	fmt.Printf("BANDWIDTH USAGE REPORT - %s\n", report.Period)
 	fmt.Println(strings.Repeat("=", 70))
-	fmt.Printf("From: %v\n", report["start_time"])
-	fmt.Printf("To:   %v\n", report["query_time"])
-	fmt.Printf("Samples: %v (every %vs)\n", report["total_samples"], report["interval_seconds"])
+	fmt.Printf("From: %s\n", report.StartTime)
+	fmt.Printf("To:   %s\n", report.QueryTime)
+	fmt.Printf("Samples: %d (every %ds)\n", report.TotalSamples, report.IntervalSeconds)
 
-	devices := report["devices"].([]map[string]interface{})
-	if len(devices) == 0 {
+	if len(report.Devices) == 0 {
 		fmt.Println("\nNo data recorded for this period.")
 		return
 	}
 
-	interval := 5
+	interval := int64(report.IntervalSeconds)
 
 	fmt.Printf("\n%-24s %-16s %-12s %-12s %-12s %-12s\n",
 		"NAME", "IP", "CONNECTION", "DOWNLOAD", "UPLOAD", "TOTAL")
@@ -135,9 +122,9 @@ func printReport(report map[string]interface{}) {
 
 	var grandDown, grandUp int64
 
-	for _, d := range devices {
-		totalDown := d["total_download"].(int64) * int64(interval)
-		totalUp := d["total_upload"].(int64) * int64(interval)
+	for _, d := range report.Devices {
+		totalDown := d.TotalDownload * interval
+		totalUp := d.TotalUpload * interval
 		total := totalDown + totalUp
 
 		if total == 0 {
@@ -147,12 +134,9 @@ func printReport(report map[string]interface{}) {
 		grandDown += totalDown
 		grandUp += totalUp
 
-		name := fmt.Sprintf("%v", d["name"])
-		// Apply alias if one exists
-		if mac, ok := d["mac"].(string); ok {
-			if alias, ok := aliases[strings.ToUpper(mac)]; ok {
-				name = alias
-			}
+		name := d.Name
+		if alias, ok := aliases[strings.ToUpper(d.MAC)]; ok {
+			name = alias
 		}
 		if len(name) > 23 {
 			name = name[:23]
@@ -161,8 +145,8 @@ func printReport(report map[string]interface{}) {
 			name = "Unknown"
 		}
 
-		fmt.Printf("%-24s %-16v %-12v %-12s %-12s %-12s\n",
-			name, d["ip"], d["connection"],
+		fmt.Printf("%-24s %-16s %-12s %-12s %-12s %-12s\n",
+			name, d.IP, d.Connection,
 			formatBytes(float64(totalDown)), formatBytes(float64(totalUp)), formatBytes(float64(total)))
 	}
 
@@ -225,4 +209,21 @@ func toFloat(v interface{}) float64 {
 	default:
 		return 0
 	}
+}
+
+func toString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+func toBool(v interface{}) bool {
+	if b, ok := v.(bool); ok {
+		return b
+	}
+	return false
 }

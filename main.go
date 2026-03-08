@@ -18,8 +18,13 @@ func main() {
 
 	switch cmd {
 	case "clients":
-		jsonOut := hasFlag("--json", "-j")
-		runClients(jsonOut)
+		if hasFlag("--watch", "-w") {
+			interval := getFlagInt("--interval", "-i", 5)
+			runWatch(interval)
+		} else {
+			jsonOut := hasFlag("--json", "-j")
+			runClients(jsonOut)
+		}
 	case "network":
 		jsonOut := hasFlag("--json", "-j")
 		runNetwork(jsonOut)
@@ -81,6 +86,16 @@ func main() {
 		runUnblock(os.Args[2])
 	case "alias":
 		runAlias()
+	case "completion":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: deco completion <bash|zsh|fish>")
+			fmt.Println("\nAdd to your shell profile:")
+			fmt.Println("  eval \"$(deco completion bash)\"   # bash")
+			fmt.Println("  eval \"$(deco completion zsh)\"    # zsh")
+			fmt.Println("  deco completion fish | source     # fish")
+			os.Exit(1)
+		}
+		runCompletion(os.Args[2])
 	default:
 		printUsage()
 		os.Exit(1)
@@ -108,6 +123,7 @@ Commands:
   block <MAC>          Block a device by MAC address
   unblock <MAC>        Unblock a device by MAC address
   alias                Manage device aliases
+  completion <shell>   Generate shell completion (bash/zsh/fish)
 
 Options:
   --json, -j           Output as JSON
@@ -115,6 +131,7 @@ Options:
   --force, -f          Skip confirmation for purge/reboot
   --name, -n <name>    Filter by device name (clients, report)
   --mac, -m <MAC>      Filter by MAC address (clients, report)
+  --watch, -w          Auto-refresh client list (use with clients)
 
 Alias usage:
   deco alias                    List all aliases
@@ -126,6 +143,7 @@ Examples:
   deco clients
   deco clients --json
   deco clients --name xbox
+  deco clients --watch
   deco poll --interval 10
   deco monitor
   deco monitor --interval 30
@@ -133,7 +151,8 @@ Examples:
   deco report hour --json
   deco purge --force
   deco alias AA-BB-CC-DD-EE-FF "Living Room TV"
-  deco reboot`)
+  deco reboot
+  eval "$(deco completion bash)"`)
 }
 
 func hasFlag(flags ...string) bool {
