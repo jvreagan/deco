@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -47,8 +48,10 @@ func runSetup() {
 		os.Exit(1)
 	}
 
-	exe, _ := os.Executable()
-	configPath := filepath.Join(filepath.Dir(exe), "deco_config.json")
+	configPath := "deco_config.json"
+	if exe, err := os.Executable(); err == nil {
+		configPath = filepath.Join(filepath.Dir(exe), "deco_config.json")
+	}
 
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		// Fall back to current directory
@@ -60,7 +63,18 @@ func runSetup() {
 	}
 
 	fmt.Printf("\nConfig saved to %s\n", configPath)
-	fmt.Println("Try it out: deco clients")
+
+	// Test the connection
+	fmt.Print("Testing connection... ")
+	client := NewDecoClient(config.Host, config.Password)
+	if err := client.Authorize(); err != nil {
+		fmt.Printf("WARNING: could not connect: %v\n", err)
+		fmt.Println("Check your router IP and password, then try: deco clients")
+	} else {
+		client.Logout()
+		fmt.Println("OK!")
+		fmt.Println("Try it out: deco clients")
+	}
 }
 
 func runVersion() {
@@ -80,6 +94,7 @@ func connectClient() (*DecoClient, *Config) {
 	}
 
 	client := NewDecoClient(config.Host, config.Password)
+	client.verbose = hasFlag("--verbose", "-v")
 	if err := client.Authorize(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error connecting: %v\n", err)
 		os.Exit(1)
@@ -133,13 +148,22 @@ func runWatch(interval int) {
 	client := NewDecoClient(config.Host, config.Password)
 	defer client.Logout()
 
+	consecutiveFailures := 0
+	baseDuration := time.Duration(interval) * time.Second
+
 	for {
 		if err := client.EnsureAuthorized(); err != nil {
-			fmt.Printf("\033[2J\033[HError connecting: %v, retrying...\n", err)
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveFailures {
+				fmt.Fprintf(os.Stderr, "Error: %d consecutive failures, giving up\n", consecutiveFailures)
+				return
+			}
+			wait := backoff(consecutiveFailures, baseDuration, 5*time.Minute)
+			fmt.Printf("\033[2J\033[HError connecting: %v, retrying in %s...\n", err, wait)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Duration(interval) * time.Second):
+			case <-time.After(wait):
 				continue
 			}
 		}
@@ -147,14 +171,22 @@ func runWatch(interval int) {
 		data, err := client.GetClients()
 		if err != nil {
 			client.Invalidate()
-			fmt.Printf("\033[2J\033[HError: %v, retrying...\n", err)
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveFailures {
+				fmt.Fprintf(os.Stderr, "Error: %d consecutive failures, giving up\n", consecutiveFailures)
+				return
+			}
+			wait := backoff(consecutiveFailures, baseDuration, 5*time.Minute)
+			fmt.Printf("\033[2J\033[HError: %v, retrying in %s...\n", err, wait)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Duration(interval) * time.Second):
+			case <-time.After(wait):
 				continue
 			}
 		}
+
+		consecutiveFailures = 0
 
 		if nameFilter != "" || macFilter != "" {
 			data = filterClients(data, nameFilter, macFilter)
@@ -167,7 +199,7 @@ func runWatch(interval int) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Duration(interval) * time.Second):
+		case <-time.After(baseDuration):
 		}
 	}
 }
@@ -227,10 +259,23 @@ func runAll() {
 	client, config := connectClient()
 	defer client.Logout()
 
-	network, _ := client.GetNetwork()
-	wireless, _ := client.GetWireless()
-	mesh, _ := client.GetMesh()
-	clients, _ := client.GetClients()
+	network, netErr := client.GetNetwork()
+	wireless, wlErr := client.GetWireless()
+	mesh, meshErr := client.GetMesh()
+	clients, cliErr := client.GetClients()
+
+	if netErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get network: %v\n", netErr)
+	}
+	if wlErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get wireless: %v\n", wlErr)
+	}
+	if meshErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get mesh: %v\n", meshErr)
+	}
+	if cliErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get clients: %v\n", cliErr)
+	}
 
 	data := AllInfo{
 		Timestamp: time.Now().Format(time.RFC3339),
@@ -292,6 +337,8 @@ func runPoll(interval int) {
 	defer cancel()
 
 	sampleCount := 0
+	consecutiveFailures := 0
+	baseDuration := time.Duration(interval) * time.Second
 
 	client := NewDecoClient(config.Host, config.Password)
 	defer client.Logout()
@@ -309,22 +356,47 @@ func runPoll(interval int) {
 			printDBLimitError(size, "Polling")
 			return
 		}
+		checkDBCapacity(db)
 
 		start := time.Now()
 
 		if err := client.EnsureAuthorized(); err != nil {
-			fmt.Printf("Error connecting: %v, retrying...\n", err)
-			waitOrCancel(ctx, interval)
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveFailures {
+				fmt.Fprintf(os.Stderr, "Error: %d consecutive failures, giving up\n", consecutiveFailures)
+				return
+			}
+			wait := backoff(consecutiveFailures, baseDuration, 5*time.Minute)
+			fmt.Printf("Error connecting: %v, retrying in %s...\n", err, wait)
+			select {
+			case <-ctx.Done():
+				fmt.Printf("\nMonitor stopped. Recorded %d samples.\n", sampleCount)
+				return
+			case <-time.After(wait):
+			}
 			continue
 		}
 
 		data, err := client.GetClients()
 		if err != nil {
 			client.Invalidate()
-			fmt.Printf("Error getting clients: %v, retrying...\n", err)
-			waitOrCancel(ctx, interval)
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveFailures {
+				fmt.Fprintf(os.Stderr, "Error: %d consecutive failures, giving up\n", consecutiveFailures)
+				return
+			}
+			wait := backoff(consecutiveFailures, baseDuration, 5*time.Minute)
+			fmt.Printf("Error getting clients: %v, retrying in %s...\n", err, wait)
+			select {
+			case <-ctx.Done():
+				fmt.Printf("\nMonitor stopped. Recorded %d samples.\n", sampleCount)
+				return
+			case <-time.After(wait):
+			}
 			continue
 		}
+
+		consecutiveFailures = 0
 
 		timestamp := time.Now().Format(time.RFC3339)
 
@@ -341,14 +413,13 @@ func runPoll(interval int) {
 		sampleCount++
 
 		activeCount := 0
-		totalDown := 0
-		totalUp := 0
+		var totalDown, totalUp int64
 		for _, c := range data.Clients {
 			if c.DownloadKbps > 0 || c.UploadKbps > 0 {
 				activeCount++
 			}
-			totalDown += c.DownloadKbps
-			totalUp += c.UploadKbps
+			totalDown += int64(c.DownloadKbps)
+			totalUp += int64(c.UploadKbps)
 		}
 
 		ts := time.Now().Format("15:04:05")
@@ -397,6 +468,8 @@ func runMonitor(interval int) {
 	defer cancel()
 
 	cycleCount := 0
+	consecutiveFailures := 0
+	baseDuration := time.Duration(interval) * time.Second
 
 	client := NewDecoClient(config.Host, config.Password)
 	defer client.Logout()
@@ -414,12 +487,24 @@ func runMonitor(interval int) {
 			printDBLimitError(size, "Monitoring")
 			return
 		}
+		checkDBCapacity(db)
 
 		start := time.Now()
 
 		if err := client.EnsureAuthorized(); err != nil {
-			fmt.Printf("[%s] Error connecting: %v, retrying next cycle...\n", time.Now().Format("15:04:05"), err)
-			waitOrCancel(ctx, interval)
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveFailures {
+				fmt.Fprintf(os.Stderr, "Error: %d consecutive failures, giving up\n", consecutiveFailures)
+				return
+			}
+			wait := backoff(consecutiveFailures, baseDuration, 5*time.Minute)
+			fmt.Printf("[%s] Error connecting: %v, retrying in %s...\n", time.Now().Format("15:04:05"), err, wait)
+			select {
+			case <-ctx.Done():
+				fmt.Printf("\nMonitor stopped. Completed %d cycles.\n", cycleCount)
+				return
+			case <-time.After(wait):
+			}
 			continue
 		}
 
@@ -431,8 +516,23 @@ func runMonitor(interval int) {
 		// If all requests failed, session is probably dead
 		if clientErr != nil && networkErr != nil && wirelessErr != nil && meshErr != nil {
 			client.Invalidate()
+			consecutiveFailures++
+			if consecutiveFailures >= maxConsecutiveFailures {
+				fmt.Fprintf(os.Stderr, "Error: %d consecutive failures, giving up\n", consecutiveFailures)
+				return
+			}
+			wait := backoff(consecutiveFailures, baseDuration, 5*time.Minute)
+			fmt.Printf("[%s] All requests failed, retrying in %s...\n", time.Now().Format("15:04:05"), wait)
+			select {
+			case <-ctx.Done():
+				fmt.Printf("\nMonitor stopped. Completed %d cycles.\n", cycleCount)
+				return
+			case <-time.After(wait):
+			}
+			continue
 		}
 
+		consecutiveFailures = 0
 		timestamp := time.Now().Format(time.RFC3339)
 		cycleCount++
 
@@ -440,9 +540,11 @@ func runMonitor(interval int) {
 		if clientErr == nil {
 			clientCount = len(clientData.Clients)
 			for _, c := range clientData.Clients {
-				db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
+				if _, err := db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
 					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-					timestamp, c.MAC, c.Name, c.IP, c.Connection, c.Type, c.DownloadKbps, c.UploadKbps)
+					timestamp, c.MAC, c.Name, c.IP, c.Connection, c.Type, c.DownloadKbps, c.UploadKbps); err != nil {
+					fmt.Fprintf(os.Stderr, "[%s] DB error (bandwidth): %v\n", time.Now().Format("15:04:05"), err)
+				}
 			}
 		} else {
 			fmt.Printf("[%s] Error getting clients: %v\n", time.Now().Format("15:04:05"), clientErr)
@@ -459,9 +561,11 @@ func runMonitor(interval int) {
 				dns2 = networkData.WAN.DNS[1]
 			}
 
-			db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent)
+			if _, err := db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent)
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				timestamp, networkData.WAN.IP, networkData.WAN.Gateway, dns1, dns2, networkData.LAN.IP, networkData.LAN.Netmask, cpuPct, memPct)
+				timestamp, networkData.WAN.IP, networkData.WAN.Gateway, dns1, dns2, networkData.LAN.IP, networkData.LAN.Netmask, cpuPct, memPct); err != nil {
+				fmt.Fprintf(os.Stderr, "[%s] DB error (network): %v\n", time.Now().Format("15:04:05"), err)
+			}
 		} else {
 			fmt.Printf("[%s] Error getting network: %v\n", time.Now().Format("15:04:05"), networkErr)
 		}
@@ -470,9 +574,11 @@ func runMonitor(interval int) {
 		if meshErr == nil {
 			meshCount = len(meshData.Devices)
 			for _, d := range meshData.Devices {
-				db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
+				if _, err := db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
 					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-					timestamp, d.Name, d.Role, d.IP, d.MAC, d.Model, d.Firmware, d.Status)
+					timestamp, d.Name, d.Role, d.IP, d.MAC, d.Model, d.Firmware, d.Status); err != nil {
+					fmt.Fprintf(os.Stderr, "[%s] DB error (mesh): %v\n", time.Now().Format("15:04:05"), err)
+				}
 			}
 		} else {
 			fmt.Printf("[%s] Error getting mesh: %v\n", time.Now().Format("15:04:05"), meshErr)
@@ -489,9 +595,11 @@ func runMonitor(interval int) {
 					guestEnabled = 1
 				}
 
-				db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
+				if _, err := db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
 					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-					timestamp, bandName, band.Host.SSID, band.Host.Channel, band.Host.ChannelWidth, hostEnabled, guestEnabled, band.Guest.SSID)
+					timestamp, bandName, band.Host.SSID, band.Host.Channel, band.Host.ChannelWidth, hostEnabled, guestEnabled, band.Guest.SSID); err != nil {
+					fmt.Fprintf(os.Stderr, "[%s] DB error (wireless): %v\n", time.Now().Format("15:04:05"), err)
+				}
 			}
 		} else {
 			fmt.Printf("[%s] Error getting wireless: %v\n", time.Now().Format("15:04:05"), wirelessErr)
@@ -576,6 +684,7 @@ func runReport(period string, jsonOut bool) {
 		err := rows.Scan(&mac, &name, &ip, &connection, &deviceType,
 			&sampleCount, &totalDown, &totalUp, &maxDown, &maxUp)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to scan row: %v\n", err)
 			continue
 		}
 
@@ -591,6 +700,9 @@ func runReport(period string, jsonOut bool) {
 			MaxDownload:   maxDown,
 			MaxUpload:     maxUp,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: error iterating rows: %v\n", err)
 	}
 
 	// Apply filters (check aliases too)
@@ -621,8 +733,10 @@ func runReport(period string, jsonOut bool) {
 	}
 
 	var totalSamples int64
-	db.QueryRow("SELECT COUNT(DISTINCT timestamp) FROM bandwidth_samples WHERE timestamp >= ?",
-		startTime.Format(time.RFC3339)).Scan(&totalSamples)
+	if err := db.QueryRow("SELECT COUNT(DISTINCT timestamp) FROM bandwidth_samples WHERE timestamp >= ?",
+		startTime.Format(time.RFC3339)).Scan(&totalSamples); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to count samples: %v\n", err)
+	}
 
 	report := &Report{
 		Period:          periodName,
@@ -634,11 +748,12 @@ func runReport(period string, jsonOut bool) {
 	}
 
 	if jsonOut {
+		interval := int64(report.IntervalSeconds)
 		for i := range report.Devices {
 			d := &report.Devices[i]
-			d.DownloadKB = d.TotalDownload * 5
-			d.UploadKB = d.TotalUpload * 5
-			d.TotalKB = (d.TotalDownload + d.TotalUpload) * 5
+			d.DownloadKB = d.TotalDownload * interval
+			d.UploadKB = d.TotalUpload * interval
+			d.TotalKB = (d.TotalDownload + d.TotalUpload) * interval
 		}
 		printJSON(report)
 	} else {
@@ -662,9 +777,15 @@ func runStatus() {
 	var totalSamples, uniqueDevices int64
 	var firstSample, lastSample sql.NullString
 
-	db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&totalSamples)
-	db.QueryRow("SELECT COUNT(DISTINCT mac) FROM bandwidth_samples").Scan(&uniqueDevices)
-	db.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM bandwidth_samples").Scan(&firstSample, &lastSample)
+	if err := db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&totalSamples); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to count samples: %v\n", err)
+	}
+	if err := db.QueryRow("SELECT COUNT(DISTINCT mac) FROM bandwidth_samples").Scan(&uniqueDevices); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to count devices: %v\n", err)
+	}
+	if err := db.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM bandwidth_samples").Scan(&firstSample, &lastSample); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to get time range: %v\n", err)
+	}
 
 	size := getDBSize()
 
@@ -688,11 +809,78 @@ func runPurge(force bool) {
 		return
 	}
 
+	// Check for selective purge flags
+	beforeStr := getFlagString("--before", "")
+	daysStr := getFlagInt("--days", "", 0)
+
+	var cutoff time.Time
+	selective := false
+	if beforeStr != "" {
+		cutoff, err = time.Parse("2006-01-02", beforeStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: invalid date %q (use YYYY-MM-DD)\n", beforeStr)
+			db.Close()
+			return
+		}
+		selective = true
+	} else if daysStr > 0 {
+		cutoff = time.Now().AddDate(0, 0, -daysStr)
+		selective = true
+	}
+
+	tables := []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
+
+	if selective {
+		cutoffStr := cutoff.Format(time.RFC3339)
+		// Count records to be deleted
+		var count int64
+		for _, table := range tables {
+			var c int64
+			if err := db.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE timestamp < ?", cutoffStr).Scan(&c); err == nil {
+				count += c
+			}
+		}
+
+		if !force {
+			fmt.Printf("\nWill delete %d records older than %s\n", count, cutoff.Format("2006-01-02"))
+			fmt.Printf("Database: %s\n", dbPath)
+			fmt.Print("Type 'yes' to confirm: ")
+
+			var confirm string
+			fmt.Scanln(&confirm)
+			if strings.ToLower(confirm) != "yes" {
+				fmt.Println("Purge cancelled.")
+				db.Close()
+				return
+			}
+		}
+
+		for _, table := range tables {
+			if _, err := db.Exec("DELETE FROM "+table+" WHERE timestamp < ?", cutoffStr); err != nil {
+				fmt.Fprintf(os.Stderr, "Error deleting from %s: %v\n", table, err)
+			}
+		}
+
+		if _, err := db.Exec("VACUUM"); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: VACUUM failed: %v\n", err)
+		}
+		db.Close()
+
+		fmt.Printf("Purged %d records older than %s\n", count, cutoff.Format("2006-01-02"))
+		fmt.Printf("Database size after purge: %s\n", formatSize(getDBSize()))
+		return
+	}
+
+	// Full purge
 	var totalSamples int64
-	db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&totalSamples)
+	if err := db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&totalSamples); err != nil {
+		fmt.Fprintf(os.Stderr, "Error counting records: %v\n", err)
+		db.Close()
+		return
+	}
 
 	if !force {
-		fmt.Printf("\nWARNING: This will delete ALL %d records!\n", totalSamples)
+		fmt.Printf("\nWARNING: This will delete ALL %d bandwidth records and all related snapshots!\n", totalSamples)
 		fmt.Printf("Database: %s\n", dbPath)
 		fmt.Print("Type 'yes' to confirm: ")
 
@@ -705,17 +893,18 @@ func runPurge(force bool) {
 		}
 	}
 
-	_, err = db.Exec("DELETE FROM bandwidth_samples")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error deleting records: %v\n", err)
-		db.Close()
-		return
+	for _, table := range tables {
+		if _, err := db.Exec("DELETE FROM " + table); err != nil {
+			fmt.Fprintf(os.Stderr, "Error deleting from %s: %v\n", table, err)
+		}
 	}
 
-	db.Exec("VACUUM")
+	if _, err := db.Exec("VACUUM"); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: VACUUM failed: %v\n", err)
+	}
 	db.Close()
 
-	fmt.Printf("Purged %d records from database.\n", totalSamples)
+	fmt.Printf("Purged all records from database.\n")
 	fmt.Printf("Database size after purge: %s\n", formatSize(getDBSize()))
 }
 
@@ -744,6 +933,11 @@ func runReboot() {
 }
 
 func runBlock(mac string) {
+	if !validMAC(mac) {
+		fmt.Fprintf(os.Stderr, "Error: invalid MAC address %q\n", mac)
+		os.Exit(1)
+	}
+
 	client, _ := connectClient()
 	defer client.Logout()
 
@@ -756,6 +950,11 @@ func runBlock(mac string) {
 }
 
 func runUnblock(mac string) {
+	if !validMAC(mac) {
+		fmt.Fprintf(os.Stderr, "Error: invalid MAC address %q\n", mac)
+		os.Exit(1)
+	}
+
 	client, _ := connectClient()
 	defer client.Logout()
 
@@ -778,6 +977,10 @@ func runAlias() {
 				os.Exit(1)
 			}
 			mac := strings.ToUpper(os.Args[3])
+			if !validMAC(mac) {
+				fmt.Fprintf(os.Stderr, "Error: invalid MAC address %q\n", mac)
+				os.Exit(1)
+			}
 			if _, ok := aliases[mac]; !ok {
 				fmt.Printf("No alias found for %s\n", mac)
 				os.Exit(1)
@@ -795,8 +998,13 @@ func runAlias() {
 
 		fmt.Printf("\n%-20s %s\n", "MAC", "ALIAS")
 		fmt.Println(strings.Repeat("-", 50))
-		for mac, name := range aliases {
-			fmt.Printf("%-20s %s\n", mac, name)
+		macs := make([]string, 0, len(aliases))
+		for mac := range aliases {
+			macs = append(macs, mac)
+		}
+		sort.Strings(macs)
+		for _, mac := range macs {
+			fmt.Printf("%-20s %s\n", mac, aliases[mac])
 		}
 		return
 	}
@@ -808,6 +1016,10 @@ func runAlias() {
 	}
 
 	mac := strings.ToUpper(os.Args[2])
+	if !validMAC(mac) {
+		fmt.Fprintf(os.Stderr, "Error: invalid MAC address %q\n", mac)
+		os.Exit(1)
+	}
 	name := strings.Join(os.Args[3:], " ")
 
 	aliases[mac] = name
@@ -830,11 +1042,12 @@ func runCompletion(shell string) {
 }
 
 func loadAliases() map[string]string {
-	exe, _ := os.Executable()
-	aliasPath := filepath.Join(filepath.Dir(exe), "deco_aliases.json")
-
-	data, err := os.ReadFile(aliasPath)
-	if err != nil {
+	var data []byte
+	if exe, err := os.Executable(); err == nil {
+		data, _ = os.ReadFile(filepath.Join(filepath.Dir(exe), "deco_aliases.json"))
+	}
+	if data == nil {
+		var err error
 		data, err = os.ReadFile("deco_aliases.json")
 		if err != nil {
 			return map[string]string{}
@@ -849,8 +1062,10 @@ func loadAliases() map[string]string {
 }
 
 func saveAliases(aliases map[string]string) {
-	exe, _ := os.Executable()
-	aliasPath := filepath.Join(filepath.Dir(exe), "deco_aliases.json")
+	aliasPath := "deco_aliases.json"
+	if exe, err := os.Executable(); err == nil {
+		aliasPath = filepath.Join(filepath.Dir(exe), "deco_aliases.json")
+	}
 
 	data, err := json.MarshalIndent(aliases, "", "  ")
 	if err != nil {
@@ -858,9 +1073,9 @@ func saveAliases(aliases map[string]string) {
 		return
 	}
 
-	if err := os.WriteFile(aliasPath, data, 0644); err != nil {
+	if err := os.WriteFile(aliasPath, data, 0600); err != nil {
 		aliasPath = "deco_aliases.json"
-		if err := os.WriteFile(aliasPath, data, 0644); err != nil {
+		if err := os.WriteFile(aliasPath, data, 0600); err != nil {
 			fmt.Fprintf(os.Stderr, "Error saving aliases: %v\n", err)
 		}
 	}
@@ -892,6 +1107,19 @@ func filterClients(data *ClientList, nameFilter, macFilter string) *ClientList {
 		Clients: filtered,
 		Count:   len(filtered),
 	}
+}
+
+const maxConsecutiveFailures = 10
+
+func backoff(failures int, base, max time.Duration) time.Duration {
+	d := base
+	for i := 0; i < failures; i++ {
+		d *= 2
+		if d > max {
+			return max
+		}
+	}
+	return d
 }
 
 func waitOrCancel(ctx context.Context, seconds int) {
@@ -933,7 +1161,7 @@ const bashCompletion = `_deco_completions() {
     if [[ ${COMP_CWORD} -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
     else
-        COMPREPLY=($(compgen -W "--json -j --interval -i --force -f --name -n --mac -m --watch -w --remove -r" -- "$cur"))
+        COMPREPLY=($(compgen -W "--json -j --interval -i --force -f --name -n --mac -m --watch -w --remove -r --verbose -v --days --before" -- "$cur"))
     fi
 }
 complete -F _deco_completions deco
@@ -983,7 +1211,11 @@ _deco() {
                 '--mac[Filter by MAC]:mac:' \
                 '-m[Filter by MAC]:mac:' \
                 '--watch[Auto-refresh display]' \
-                '-w[Auto-refresh display]'
+                '-w[Auto-refresh display]' \
+                '--verbose[Show debug output]' \
+                '-v[Show debug output]' \
+                '--days[Purge records older than N days]:days:' \
+                '--before[Purge records before date]:date:'
             ;;
     esac
 }
@@ -1018,4 +1250,7 @@ complete -c deco -l force -s f -d 'Skip confirmation'
 complete -c deco -l name -s n -d 'Filter by name' -r
 complete -c deco -l mac -s m -d 'Filter by MAC' -r
 complete -c deco -l watch -s w -d 'Auto-refresh display'
+complete -c deco -l verbose -s v -d 'Show debug output'
+complete -c deco -l days -d 'Purge records older than N days' -r
+complete -c deco -l before -d 'Purge records before date' -r
 `

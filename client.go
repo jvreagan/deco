@@ -34,6 +34,7 @@ type DecoClient struct {
 	stok     string
 	sysauth  string
 	logged   bool
+	verbose  bool
 
 	// Encryption
 	aesKey []byte
@@ -50,14 +51,29 @@ type DecoClient struct {
 }
 
 func loadConfig() (*Config, error) {
-	exe, _ := os.Executable()
-	configPath := filepath.Join(filepath.Dir(exe), "deco_config.json")
+	var configPath string
+	exe, err := os.Executable()
+	if err == nil {
+		configPath = filepath.Join(filepath.Dir(exe), "deco_config.json")
+	}
 
-	data, err := os.ReadFile(configPath)
-	if err != nil {
+	var data []byte
+	if configPath != "" {
+		data, err = os.ReadFile(configPath)
+	}
+	if data == nil {
 		data, err = os.ReadFile("deco_config.json")
 		if err != nil {
 			return nil, fmt.Errorf("cannot find deco_config.json")
+		}
+		configPath = "deco_config.json"
+	}
+
+	// Warn if config file is world-readable
+	if info, statErr := os.Stat(configPath); statErr == nil {
+		if info.Mode().Perm()&0077 != 0 {
+			fmt.Fprintf(os.Stderr, "Warning: %s is readable by other users (mode %o). Consider: chmod 600 %s\n",
+				configPath, info.Mode().Perm(), configPath)
 		}
 	}
 
@@ -83,7 +99,7 @@ func validateConfig(config *Config) error {
 }
 
 func NewDecoClient(host, password string) *DecoClient {
-	jar, _ := cookiejar.New(nil)
+	jar, _ := cookiejar.New(nil) // cookiejar.New never returns an error with nil options
 	client := &http.Client{
 		Jar:     jar,
 		Timeout: 30 * time.Second,
@@ -111,7 +127,7 @@ func (dc *DecoClient) EnsureAuthorized() error {
 		return nil
 	}
 	// Reset HTTP client to clear stale cookies
-	jar, _ := cookiejar.New(nil)
+	jar, _ := cookiejar.New(nil) // cookiejar.New never returns an error with nil options
 	dc.client.Jar = jar
 	dc.aesKey, dc.aesIV = generateAESKeyIV()
 	return dc.Authorize()
@@ -133,7 +149,10 @@ func (dc *DecoClient) getPasswordKeys() error {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read password keys response: %v", err)
+	}
 
 	var result struct {
 		Result struct {
@@ -165,7 +184,10 @@ func (dc *DecoClient) getAuthKeys() error {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read auth keys response: %v", err)
+	}
 
 	var result struct {
 		Result struct {
@@ -190,7 +212,7 @@ func (dc *DecoClient) getAuthKeys() error {
 	return nil
 }
 
-func (dc *DecoClient) getSignature(dataLen int, isLogin bool) string {
+func (dc *DecoClient) getSignature(dataLen int, isLogin bool) (string, error) {
 	hash := md5.Sum([]byte("admin" + dc.password))
 	hashStr := hex.EncodeToString(hash[:])
 
@@ -216,14 +238,20 @@ func (dc *DecoClient) Authorize() error {
 	}
 
 	// Encrypt password
-	encPassword := rsaEncrypt(dc.password, dc.pwdN, dc.pwdE)
+	encPassword, err := rsaEncrypt(dc.password, dc.pwdN, dc.pwdE)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt password: %v", err)
+	}
 
 	// Build login data - Deco uses JSON format
 	loginDataMap := map[string]interface{}{
 		"params":    map[string]string{"password": encPassword},
 		"operation": "login",
 	}
-	loginDataBytes, _ := json.Marshal(loginDataMap)
+	loginDataBytes, err := json.Marshal(loginDataMap)
+	if err != nil {
+		return fmt.Errorf("failed to marshal login data: %v", err)
+	}
 	loginData := string(loginDataBytes)
 
 	// Encrypt with AES
@@ -233,7 +261,10 @@ func (dc *DecoClient) Authorize() error {
 	}
 
 	// Get signature
-	signature := dc.getSignature(len(encryptedData), true)
+	signature, err := dc.getSignature(len(encryptedData), true)
+	if err != nil {
+		return fmt.Errorf("failed to get login signature: %v", err)
+	}
 
 	// POST login
 	loginURL := fmt.Sprintf("http://%s/cgi-bin/luci/;stok=/login?form=login", dc.host)
@@ -241,7 +272,10 @@ func (dc *DecoClient) Authorize() error {
 	// Build body manually to match Python's order (sign before data)
 	bodyStr := fmt.Sprintf("sign=%s&data=%s", signature, url.QueryEscape(encryptedData))
 
-	req, _ := http.NewRequest("POST", loginURL, strings.NewReader(bodyStr))
+	req, err := http.NewRequest("POST", loginURL, strings.NewReader(bodyStr))
+	if err != nil {
+		return fmt.Errorf("failed to create login request: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Referer", fmt.Sprintf("http://%s/webpages/index.html", dc.host))
 
@@ -251,7 +285,10 @@ func (dc *DecoClient) Authorize() error {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read login response: %v", err)
+	}
 
 	if len(body) == 0 {
 		return fmt.Errorf("empty response from login endpoint, status: %d, url: %s", resp.StatusCode, loginURL)
@@ -307,18 +344,28 @@ func (dc *DecoClient) Authorize() error {
 	return nil
 }
 
-func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
-	if !dc.logged {
-		return nil, fmt.Errorf("not logged in")
+func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
+	start := time.Now()
+	if dc.verbose {
+		fmt.Fprintf(os.Stderr, "[verbose] POST %s\n", path)
 	}
 
-	jsonData, _ := json.Marshal(reqData)
+	jsonData, err := json.Marshal(reqData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request data: %v", err)
+	}
 
 	// Encrypt request
-	encryptedData, _ := aesEncrypt(jsonData, dc.aesKey, dc.aesIV)
+	encryptedData, err := aesEncrypt(jsonData, dc.aesKey, dc.aesIV)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt request: %v", err)
+	}
 
 	// Get signature
-	signature := dc.getSignature(len(encryptedData), false)
+	signature, err := dc.getSignature(len(encryptedData), false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get request signature: %v", err)
+	}
 
 	// Build request
 	reqURL := fmt.Sprintf("%s/%s", dc.baseURL(), path)
@@ -326,7 +373,10 @@ func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[
 	// Build body (sign before data)
 	bodyStr := fmt.Sprintf("sign=%s&data=%s", signature, url.QueryEscape(encryptedData))
 
-	req, _ := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
+	req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %v", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Referer", fmt.Sprintf("http://%s/webpages/index.html", dc.host))
 
@@ -340,7 +390,14 @@ func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %v", err)
+	}
+
+	if dc.verbose {
+		fmt.Fprintf(os.Stderr, "[verbose] %s -> %d (%d bytes, %s)\n", path, resp.StatusCode, len(body), time.Since(start))
+	}
 
 	var responseData string
 
@@ -381,6 +438,27 @@ func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[
 	}
 
 	return decryptedResp, nil
+}
+
+func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
+	if !dc.logged {
+		return nil, fmt.Errorf("not logged in")
+	}
+
+	result, err := dc.requestOnce(path, reqData)
+	if err != nil {
+		// Check for session expired/forbidden errors — auto-retry once
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "API error code: -40401") || strings.Contains(errMsg, "API error code: -40403") {
+			dc.Invalidate()
+			if authErr := dc.Authorize(); authErr != nil {
+				return nil, fmt.Errorf("re-auth failed: %v (original: %v)", authErr, err)
+			}
+			return dc.requestOnce(path, reqData)
+		}
+		return nil, err
+	}
+	return result, nil
 }
 
 func (dc *DecoClient) Logout() {

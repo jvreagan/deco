@@ -842,3 +842,74 @@ func TestClientListJSON(t *testing.T) {
 		t.Errorf("JSON download_kbps = %v, want 100", client["download_kbps"])
 	}
 }
+
+// ==================== SESSION EXPIRY RETRY TEST ====================
+
+func TestSessionExpiryRetry(t *testing.T) {
+	mock := newMockDecoServer(t, "testpass")
+	callCount := 0
+
+	// Wrap the mock to return -40401 on the first API call after login
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		query := r.URL.RawQuery
+
+		// Let login/keys/auth through normally
+		if strings.Contains(path, "/login") || strings.Contains(query, "form=keys") ||
+			strings.Contains(query, "form=auth") || strings.Contains(query, "form=login") {
+			mock.ServeHTTP(w, r)
+			return
+		}
+
+		// For API calls: first call returns -40401, subsequent calls succeed
+		callCount++
+		if callCount == 1 {
+			// Return session expired error (encrypted)
+			if mock.aesKey == nil {
+				http.Error(w, "not authenticated", http.StatusUnauthorized)
+				return
+			}
+
+			// Read and discard the request body
+			io.ReadAll(r.Body)
+
+			respPayload := map[string]interface{}{
+				"error_code": -40401,
+			}
+			respJSON, _ := json.Marshal(respPayload)
+			encResp, _ := aesEncrypt(respJSON, mock.aesKey, mock.aesIV)
+
+			resp := map[string]interface{}{
+				"data":       encResp,
+				"error_code": 0,
+			}
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		// Subsequent calls go through normally
+		mock.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	host := strings.TrimPrefix(server.URL, "http://")
+	client := NewDecoClient(host, "testpass")
+
+	if err := client.Authorize(); err != nil {
+		t.Fatalf("Authorize failed: %v", err)
+	}
+
+	// This should fail with -40401, auto re-auth, then succeed
+	data, err := client.GetClients()
+	if err != nil {
+		t.Fatalf("GetClients should succeed after retry: %v", err)
+	}
+
+	if data.Count != 2 {
+		t.Errorf("Count = %d, want 2", data.Count)
+	}
+
+	if callCount < 2 {
+		t.Errorf("expected at least 2 API calls (1 failed + 1 retry), got %d", callCount)
+	}
+}

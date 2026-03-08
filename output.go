@@ -3,12 +3,25 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"regexp"
+	"sort"
 	"strings"
 )
 
 func printJSON(data interface{}) {
-	out, _ := json.MarshalIndent(data, "", "  ")
+	out, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling JSON: %v\n", err)
+		return
+	}
 	fmt.Println(string(out))
+}
+
+var macRegexp = regexp.MustCompile(`^([0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}$`)
+
+func validMAC(mac string) bool {
+	return macRegexp.MatchString(mac)
 }
 
 func printClientsTable(data *ClientList) {
@@ -70,7 +83,13 @@ func printNetworkTable(data *NetworkInfo) {
 
 func printWirelessTable(data *WirelessInfo) {
 	fmt.Print("\n=== Wireless Networks ===\n\n")
-	for bandName, band := range data.Bands {
+	bandNames := make([]string, 0, len(data.Bands))
+	for k := range data.Bands {
+		bandNames = append(bandNames, k)
+	}
+	sort.Strings(bandNames)
+	for _, bandName := range bandNames {
+		band := data.Bands[bandName]
 		status := "x"
 		if band.Host.Enabled {
 			status = "o"

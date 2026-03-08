@@ -116,7 +116,7 @@ Commands:
   monitor              Full network monitoring to SQLite
   report [period]      Show usage report (today/hour/all)
   status               Show database statistics
-  purge                Delete all records
+  purge                Delete records (all, or by --days/--before)
   api <endpoint>       Call a raw API endpoint
   version              Show version
   reboot               Reboot the router
@@ -132,6 +132,9 @@ Options:
   --name, -n <name>    Filter by device name (clients, report)
   --mac, -m <MAC>      Filter by MAC address (clients, report)
   --watch, -w          Auto-refresh client list (use with clients)
+  --verbose, -v        Show debug output on stderr
+  --days N             Purge records older than N days
+  --before YYYY-MM-DD  Purge records before date
 
 Alias usage:
   deco alias                    List all aliases

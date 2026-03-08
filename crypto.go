@@ -121,7 +121,7 @@ func rsaEncryptPKCS1(data []byte, n *big.Int, e int) ([]byte, error) {
 	return result, nil
 }
 
-func rsaEncrypt(data string, n *big.Int, e int) string {
+func rsaEncrypt(data string, n *big.Int, e int) (string, error) {
 	modSize := (n.BitLen() + 7) / 8
 	step := 53 // Python uses 53 byte chunks
 
@@ -133,19 +133,16 @@ func rsaEncrypt(data string, n *big.Int, e int) string {
 		}
 		chunk := []byte(data[i:end])
 
-		// Use PKCS1v1.5 encryption
 		encrypted, err := rsaEncryptPKCS1(chunk, n, e)
 		if err != nil {
-			// Fallback shouldn't happen but just in case
-			continue
+			return "", fmt.Errorf("RSA encrypt chunk at offset %d: %v", i, err)
 		}
 
-		// Pad result to modulus size
 		encHex := hex.EncodeToString(encrypted)
 		for len(encHex) < modSize*2 {
 			encHex = "0" + encHex
 		}
 		result.WriteString(encHex)
 	}
-	return result.String()
+	return result.String(), nil
 }

@@ -2,12 +2,44 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// ==================== MAC VALIDATION TESTS ====================
+
+func TestValidMAC(t *testing.T) {
+	tests := []struct {
+		name string
+		mac  string
+		want bool
+	}{
+		{"valid dash", "AA-BB-CC-DD-EE-FF", true},
+		{"valid colon", "AA:BB:CC:DD:EE:FF", true},
+		{"valid lowercase", "aa-bb-cc-dd-ee-ff", true},
+		{"valid mixed case", "aA-Bb-Cc-Dd-Ee-Ff", true},
+		{"too short", "AA-BB-CC-DD-EE", false},
+		{"too long", "AA-BB-CC-DD-EE-FF-00", false},
+		{"non-hex", "GG-HH-II-JJ-KK-LL", false},
+		{"empty", "", false},
+		{"no separator", "AABBCCDDEEFF", false},
+		{"mixed separators", "AA-BB:CC-DD:EE-FF", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validMAC(tt.mac)
+			if got != tt.want {
+				t.Errorf("validMAC(%q) = %v, want %v", tt.mac, got, tt.want)
+			}
+		})
+	}
+}
 
 // ==================== PURE UTILITY TESTS ====================
 
@@ -214,6 +246,35 @@ func TestGetFlagString(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("getFlagString(%q, %q) with args %v = %q, want %q",
 					tt.long, tt.short, tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+// ==================== BACKOFF TESTS ====================
+
+func TestBackoff(t *testing.T) {
+	base := 5 * time.Second
+	max := 5 * time.Minute
+
+	tests := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{0, 5 * time.Second},
+		{1, 10 * time.Second},
+		{2, 20 * time.Second},
+		{3, 40 * time.Second},
+		{4, 80 * time.Second},
+		{5, 160 * time.Second},
+		{6, 5 * time.Minute},  // capped
+		{10, 5 * time.Minute}, // still capped
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("failures=%d", tt.failures), func(t *testing.T) {
+			got := backoff(tt.failures, base, max)
+			if got != tt.want {
+				t.Errorf("backoff(%d, %s, %s) = %s, want %s", tt.failures, base, max, got, tt.want)
 			}
 		})
 	}
@@ -517,5 +578,347 @@ func TestDBCrossTableCorrelation(t *testing.T) {
 				t.Errorf("expected 1 row in %s for timestamp %s, got %d", table, ts, count)
 			}
 		})
+	}
+}
+
+// ==================== OUTPUT TESTS ====================
+
+func TestPrintClientsTable(t *testing.T) {
+	data := &ClientList{
+		Clients: []ClientInfo{
+			{Name: "TestDevice", IP: "192.168.68.100", MAC: "AA-BB-CC-DD-EE-FF", Connection: "WiFi 5GHz", Type: "phone", DownloadKbps: 1500, UploadKbps: 300},
+			{Name: "VeryLongDeviceNameThatShouldBeTruncatedHere", IP: "192.168.68.101", MAC: "11-22-33-44-55-66", Connection: "Wired", Type: "computer", DownloadKbps: 0, UploadKbps: 0},
+		},
+		Count: 2,
+	}
+
+	// Capture stdout
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printClientsTable(data)
+
+	w.Close()
+	os.Stdout = old
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	if !strings.Contains(output, "NAME") {
+		t.Error("output should contain header NAME")
+	}
+	if !strings.Contains(output, "TestDevice") {
+		t.Error("output should contain TestDevice")
+	}
+	if !strings.Contains(output, "Total: 2 clients") {
+		t.Error("output should contain Total: 2 clients")
+	}
+	if !strings.Contains(output, "1500KB/s") {
+		t.Error("output should contain download speed 1500KB/s")
+	}
+}
+
+func TestPrintNetworkTable(t *testing.T) {
+	cpu := float64(15)
+	mem := float64(42)
+	data := &NetworkInfo{
+		WAN: WANInfo{IP: "1.2.3.4", Gateway: "1.2.3.1", Netmask: "255.255.255.0", MAC: "AA-BB-CC-DD-EE-00"},
+		LAN: LANInfo{IP: "192.168.68.1", Netmask: "255.255.255.0", MAC: "AA-BB-CC-DD-EE-01"},
+		Performance: PerformanceInfo{CPUPercent: &cpu, MemPercent: &mem},
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printNetworkTable(data)
+
+	w.Close()
+	os.Stdout = old
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	if !strings.Contains(output, "=== WAN ===") {
+		t.Error("output should contain WAN section")
+	}
+	if !strings.Contains(output, "=== LAN ===") {
+		t.Error("output should contain LAN section")
+	}
+	if !strings.Contains(output, "=== Performance ===") {
+		t.Error("output should contain Performance section")
+	}
+	if !strings.Contains(output, "15%") {
+		t.Error("output should show CPU 15%")
+	}
+	if !strings.Contains(output, "42%") {
+		t.Error("output should show Memory 42%")
+	}
+
+	// Test with nil CPU/Mem
+	dataNil := &NetworkInfo{
+		WAN: WANInfo{IP: "1.2.3.4"},
+		LAN: LANInfo{IP: "192.168.68.1"},
+	}
+
+	r2, w2, _ := os.Pipe()
+	os.Stdout = w2
+
+	printNetworkTable(dataNil)
+
+	w2.Close()
+	os.Stdout = old
+
+	var buf2 [4096]byte
+	n2, _ := r2.Read(buf2[:])
+	output2 := string(buf2[:n2])
+
+	if !strings.Contains(output2, "N/A") {
+		t.Error("output should show N/A for nil CPU/Mem")
+	}
+}
+
+func TestPrintMeshTable(t *testing.T) {
+	data := &MeshInfo{
+		Devices: []MeshDevice{
+			{Name: "Main", Model: "Deco BE63", Role: "master", IP: "192.168.68.1", MAC: "8C-90-2D-B5-5F-86"},
+			{Name: "Slave", Model: "Deco BE63", Role: "slave", IP: "192.168.71.250", MAC: "8C-90-2D-B5-5F-8C"},
+		},
+		Count: 2,
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printMeshTable(data)
+
+	w.Close()
+	os.Stdout = old
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	if !strings.Contains(output, "* Main") {
+		t.Error("output should show master with * marker")
+	}
+	if !strings.Contains(output, "Mesh Devices (2)") {
+		t.Error("output should show device count")
+	}
+}
+
+func TestPrintReport(t *testing.T) {
+	report := &Report{
+		Period:          "Today",
+		StartTime:       "2026-03-08T00:00:00Z",
+		QueryTime:       "2026-03-08T12:00:00Z",
+		IntervalSeconds: 5,
+		TotalSamples:    100,
+		Devices: []ReportDevice{
+			{MAC: "AA-BB-CC-DD-EE-FF", Name: "Phone", IP: "192.168.68.100", Connection: "WiFi 5GHz", TotalDownload: 1000, TotalUpload: 500},
+		},
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printReport(report)
+
+	w.Close()
+	os.Stdout = old
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	if !strings.Contains(output, "BANDWIDTH USAGE REPORT") {
+		t.Error("output should contain report header")
+	}
+	if !strings.Contains(output, "TOTAL") {
+		t.Error("output should contain TOTAL row")
+	}
+
+	// Test no data case
+	emptyReport := &Report{
+		Period:  "Today",
+		Devices: []ReportDevice{},
+	}
+
+	r2, w2, _ := os.Pipe()
+	os.Stdout = w2
+
+	printReport(emptyReport)
+
+	w2.Close()
+	os.Stdout = old
+
+	var buf2 [4096]byte
+	n2, _ := r2.Read(buf2[:])
+	output2 := string(buf2[:n2])
+
+	if !strings.Contains(output2, "No data recorded") {
+		t.Error("empty report should say 'No data recorded'")
+	}
+}
+
+func TestPrintWirelessTableDeterministic(t *testing.T) {
+	data := &WirelessInfo{
+		Bands: map[string]BandInfo{
+			"6GHz":   {Band: "6GHz", Host: HostInfo{Enabled: true, SSID: "Net6", Channel: "1"}},
+			"2.4GHz": {Band: "2.4GHz", Host: HostInfo{Enabled: true, SSID: "Net2", Channel: "6"}},
+			"5GHz":   {Band: "5GHz", Host: HostInfo{Enabled: true, SSID: "Net5", Channel: "149"}},
+		},
+	}
+
+	captureOutput := func() string {
+		old := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+		printWirelessTable(data)
+		w.Close()
+		os.Stdout = old
+		var buf [4096]byte
+		n, _ := r.Read(buf[:])
+		return string(buf[:n])
+	}
+
+	out1 := captureOutput()
+	out2 := captureOutput()
+
+	if out1 != out2 {
+		t.Error("printWirelessTable should produce deterministic output")
+	}
+
+	// Verify ordering: 2.4GHz should come before 5GHz which should come before 6GHz
+	idx24 := strings.Index(out1, "2.4GHz")
+	idx5 := strings.Index(out1, "5GHz")
+	idx6 := strings.Index(out1, "6GHz")
+
+	if idx24 >= idx5 || idx5 >= idx6 {
+		t.Errorf("bands should be sorted: 2.4GHz(%d) < 5GHz(%d) < 6GHz(%d)", idx24, idx5, idx6)
+	}
+}
+
+// ==================== CONFIG + ALIAS TESTS ====================
+
+func TestLoadConfigMissing(t *testing.T) {
+	// Override os.Executable to point somewhere without a config
+	origDir, _ := os.Getwd()
+	tmpDir := t.TempDir()
+	os.Chdir(tmpDir)
+	defer os.Chdir(origDir)
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Error("loadConfig should fail when no config file exists")
+	}
+}
+
+func TestLoadSaveAliases(t *testing.T) {
+	// Save aliases to a temp dir as cwd
+	origDir, _ := os.Getwd()
+	tmpDir := t.TempDir()
+	os.Chdir(tmpDir)
+	defer os.Chdir(origDir)
+
+	aliases := map[string]string{
+		"AA-BB-CC-DD-EE-FF": "My Phone",
+		"11-22-33-44-55-66": "My PC",
+	}
+
+	// Write aliases to cwd (saveAliases tries exe dir first, falls back to cwd)
+	data, _ := json.MarshalIndent(aliases, "", "  ")
+	os.WriteFile("deco_aliases.json", data, 0600)
+
+	loaded := loadAliases()
+	if loaded["AA-BB-CC-DD-EE-FF"] != "My Phone" {
+		t.Errorf("alias = %q, want %q", loaded["AA-BB-CC-DD-EE-FF"], "My Phone")
+	}
+	if loaded["11-22-33-44-55-66"] != "My PC" {
+		t.Errorf("alias = %q, want %q", loaded["11-22-33-44-55-66"], "My PC")
+	}
+}
+
+// ==================== DB PRUNE + CAPACITY TESTS ====================
+
+func TestCheckDBSizeLimit(t *testing.T) {
+	// With the test DB, it should be well within limits
+	_ = setupTestDB(t)
+
+	ok, size := checkDBSizeLimit()
+	if !ok {
+		t.Errorf("checkDBSizeLimit should return true for small DB, got false (size=%d)", size)
+	}
+}
+
+func TestPruneOlderThan(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Insert old records (60 days ago)
+	oldTS := time.Now().AddDate(0, 0, -60).Format(time.RFC3339)
+	newTS := time.Now().Format(time.RFC3339)
+
+	// Insert into all 4 tables
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
+		oldTS, "AA-BB-CC-DD-EE-FF", "OldDevice", 100, 50)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
+		newTS, "AA-BB-CC-DD-EE-FF", "NewDevice", 200, 100)
+
+	db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip) VALUES (?, ?)`, oldTS, "1.2.3.4")
+	db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip) VALUES (?, ?)`, newTS, "1.2.3.4")
+
+	db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role) VALUES (?, ?, ?)`, oldTS, "Main", "master")
+	db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role) VALUES (?, ?, ?)`, newTS, "Main", "master")
+
+	db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid) VALUES (?, ?, ?)`, oldTS, "5GHz", "Net")
+	db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid) VALUES (?, ?, ?)`, newTS, "5GHz", "Net")
+
+	// Prune records older than 30 days
+	err := pruneOlderThan(db, 30)
+	if err != nil {
+		t.Fatalf("pruneOlderThan failed: %v", err)
+	}
+
+	// Verify only new records remain in each table
+	tables := []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
+	for _, table := range tables {
+		var count int
+		db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count)
+		if count != 1 {
+			t.Errorf("expected 1 row in %s after prune, got %d", table, count)
+		}
+	}
+}
+
+func TestSelectivePurge(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Insert records spanning multiple dates
+	dates := []string{
+		time.Now().AddDate(0, 0, -10).Format(time.RFC3339),
+		time.Now().AddDate(0, 0, -5).Format(time.RFC3339),
+		time.Now().Format(time.RFC3339),
+	}
+
+	for _, ts := range dates {
+		db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
+			ts, "AA-BB-CC-DD-EE-FF", "Device", 100, 50)
+	}
+
+	// Prune records older than 7 days (should delete the -10 day record)
+	err := pruneOlderThan(db, 7)
+	if err != nil {
+		t.Fatalf("pruneOlderThan failed: %v", err)
+	}
+
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&count)
+	if count != 2 {
+		t.Errorf("expected 2 rows after prune (7 days), got %d", count)
 	}
 }

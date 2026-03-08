@@ -2,8 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -16,13 +18,15 @@ const (
 var dbPath string
 
 func init() {
-	exe, _ := os.Executable()
-	dir := filepath.Dir(exe)
-	if _, err := os.Stat(dir); err == nil {
-		dbPath = filepath.Join(dir, "network_usage.db")
-	} else {
-		dbPath = "network_usage.db"
+	exe, err := os.Executable()
+	if err == nil {
+		dir := filepath.Dir(exe)
+		if _, err := os.Stat(dir); err == nil {
+			dbPath = filepath.Join(dir, "network_usage.db")
+			return
+		}
 	}
+	dbPath = "network_usage.db"
 }
 
 func initDB() (*sql.DB, error) {
@@ -104,4 +108,29 @@ func getDBSize() int64 {
 func checkDBSizeLimit() (bool, int64) {
 	size := getDBSize()
 	return size < DBSizeLimitBytes, size
+}
+
+func checkDBCapacity(db *sql.DB) {
+	size := getDBSize()
+	pct := float64(size) / float64(DBSizeLimitBytes) * 100
+	if pct >= 90 {
+		fmt.Fprintf(os.Stderr, "Warning: database at %.0f%% capacity, auto-pruning records older than 30 days\n", pct)
+		if err := pruneOlderThan(db, 30); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: auto-prune failed: %v\n", err)
+		}
+	} else if pct >= 80 {
+		fmt.Fprintf(os.Stderr, "Warning: database at %.0f%% capacity (%s / %s). Consider running 'deco purge --days 30'\n",
+			pct, formatSize(size), formatSize(DBSizeLimitBytes))
+	}
+}
+
+func pruneOlderThan(db *sql.DB, days int) error {
+	cutoff := time.Now().AddDate(0, 0, -days).Format(time.RFC3339)
+	tables := []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
+	for _, table := range tables {
+		if _, err := db.Exec("DELETE FROM "+table+" WHERE timestamp < ?", cutoff); err != nil {
+			return fmt.Errorf("failed to prune %s: %v", table, err)
+		}
+	}
+	return nil
 }
