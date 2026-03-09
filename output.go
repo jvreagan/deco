@@ -134,9 +134,9 @@ func printReport(report *Report) {
 
 	interval := int64(report.IntervalSeconds)
 
-	fmt.Printf("\n%-24s %-16s %-12s %-12s %-12s %-12s\n",
-		"NAME", "IP", "CONNECTION", "DOWNLOAD", "UPLOAD", "TOTAL")
-	fmt.Println(strings.Repeat("-", 90))
+	fmt.Printf("\n%-22s %-16s %-16s %-12s %-12s %-12s\n",
+		"NAME", "IP", "CONNECTIONS", "DOWNLOAD", "UPLOAD", "TOTAL")
+	fmt.Println(strings.Repeat("-", 92))
 
 	var grandDown, grandUp int64
 
@@ -156,22 +156,171 @@ func printReport(report *Report) {
 		if alias, ok := aliases[strings.ToUpper(d.MAC)]; ok {
 			name = alias
 		}
-		if len(name) > 23 {
-			name = name[:23]
+		if len(name) > 21 {
+			name = name[:21]
 		}
 		if name == "" {
 			name = "Unknown"
 		}
 
-		fmt.Printf("%-24s %-16s %-12s %-12s %-12s %-12s\n",
-			name, d.IP, d.Connection,
+		connCol := d.Connection
+		if len(d.ConnectionBreakdown) > 1 {
+			connCol = formatConnBreakdown(d.ConnectionBreakdown)
+		} else if len(d.ConnectionBreakdown) == 1 {
+			for k := range d.ConnectionBreakdown {
+				connCol = connAbbrev(k) + ":100%"
+			}
+		}
+
+		fmt.Printf("%-22s %-16s %-16s %-12s %-12s %-12s\n",
+			name, d.IP, connCol,
 			formatBytes(float64(totalDown)), formatBytes(float64(totalUp)), formatBytes(float64(total)))
 	}
 
-	fmt.Println(strings.Repeat("-", 90))
-	fmt.Printf("%-24s %-16s %-12s %-12s %-12s %-12s\n",
+	fmt.Println(strings.Repeat("-", 92))
+	fmt.Printf("%-22s %-16s %-16s %-12s %-12s %-12s\n",
 		"TOTAL", "", "",
 		formatBytes(float64(grandDown)), formatBytes(float64(grandUp)), formatBytes(float64(grandDown+grandUp)))
+}
+
+func printNetworkReport(entries []NetworkReportEntry, period string) {
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Printf("NETWORK REPORT - %s\n", period)
+	fmt.Println(strings.Repeat("=", 70))
+
+	if len(entries) == 0 {
+		fmt.Println("\nNo network snapshots recorded for this period.")
+		return
+	}
+
+	// WAN IP changes
+	fmt.Println("\n--- WAN IP History ---")
+	currentIP := ""
+	firstSeen := ""
+	for _, e := range entries {
+		if e.WANIP != currentIP {
+			if currentIP != "" {
+				fmt.Printf("  %s  %s -> %s\n", currentIP, firstSeen, e.Timestamp)
+			}
+			currentIP = e.WANIP
+			firstSeen = e.Timestamp
+		}
+	}
+	if currentIP != "" {
+		fmt.Printf("  %s  %s -> now\n", currentIP, firstSeen)
+	}
+
+	// CPU/Memory summary
+	var sumCPU, sumMem, maxCPU, maxMem float64
+	for _, e := range entries {
+		sumCPU += e.CPU
+		sumMem += e.Memory
+		if e.CPU > maxCPU {
+			maxCPU = e.CPU
+		}
+		if e.Memory > maxMem {
+			maxMem = e.Memory
+		}
+	}
+	n := float64(len(entries))
+	fmt.Printf("\n--- Performance (%d snapshots) ---\n", len(entries))
+	fmt.Printf("  CPU:    avg %.1f%%, max %.1f%%\n", sumCPU/n, maxCPU)
+	fmt.Printf("  Memory: avg %.1f%%, max %.1f%%\n", sumMem/n, maxMem)
+}
+
+func printMeshReport(entries []MeshReportEntry, period string) {
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Printf("MESH REPORT - %s\n", period)
+	fmt.Println(strings.Repeat("=", 70))
+
+	if len(entries) == 0 {
+		fmt.Println("\nNo mesh snapshots recorded for this period.")
+		return
+	}
+
+	// Group by MAC to compute uptime per node
+	type nodeStats struct {
+		name     string
+		role     string
+		ip       string
+		firmware string
+		total    int
+		online   int
+	}
+	nodes := map[string]*nodeStats{}
+	var nodeOrder []string
+	for _, e := range entries {
+		mac := strings.ToUpper(e.MAC)
+		ns, ok := nodes[mac]
+		if !ok {
+			ns = &nodeStats{name: e.Name, role: e.Role, ip: e.IP, firmware: e.Firmware}
+			nodes[mac] = ns
+			nodeOrder = append(nodeOrder, mac)
+		}
+		ns.total++
+		if e.Status == "online" {
+			ns.online++
+		}
+		// Track firmware changes
+		if e.Firmware != ns.firmware {
+			ns.firmware = e.Firmware
+		}
+	}
+
+	fmt.Printf("\n%-20s %-8s %-16s %-18s %-10s %-10s\n",
+		"NAME", "ROLE", "IP", "MAC", "FIRMWARE", "UPTIME")
+	fmt.Println(strings.Repeat("-", 90))
+
+	for _, mac := range nodeOrder {
+		ns := nodes[mac]
+		uptime := float64(ns.online) / float64(ns.total) * 100
+		fmt.Printf("%-20s %-8s %-16s %-18s %-10s %.1f%%\n",
+			ns.name, ns.role, ns.ip, mac, ns.firmware, uptime)
+	}
+
+	fmt.Printf("\nSnapshots: %d\n", len(entries))
+}
+
+// connAbbrev returns a short label for a connection type.
+func connAbbrev(conn string) string {
+	switch conn {
+	case "WiFi 2.4GHz":
+		return "2.4"
+	case "WiFi 5GHz":
+		return "5"
+	case "WiFi 6GHz":
+		return "6"
+	case "Wired":
+		return "W"
+	default:
+		return conn
+	}
+}
+
+// formatConnBreakdown formats a connection breakdown map as e.g. "5:80% W:20%".
+func formatConnBreakdown(breakdown map[string]int64) string {
+	if len(breakdown) == 0 {
+		return ""
+	}
+
+	var total int64
+	for _, v := range breakdown {
+		total += v
+	}
+
+	// Sort keys for deterministic output
+	keys := make([]string, 0, len(breakdown))
+	for k := range breakdown {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var parts []string
+	for _, k := range keys {
+		pct := breakdown[k] * 100 / total
+		parts = append(parts, fmt.Sprintf("%s:%d%%", connAbbrev(k), pct))
+	}
+	return strings.Join(parts, " ")
 }
 
 // ==================== HELPERS ====================

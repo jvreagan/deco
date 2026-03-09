@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -18,18 +17,18 @@ const (
 var dbPath string
 
 func init() {
-	exe, err := os.Executable()
-	if err == nil {
-		dir := filepath.Dir(exe)
-		if _, err := os.Stat(dir); err == nil {
-			dbPath = filepath.Join(dir, "network_usage.db")
-			return
-		}
-	}
-	dbPath = "network_usage.db"
+	dbPath = cfgPath("network_usage.db")
+}
+
+// setDBPath overrides the database path (used in tests).
+func setDBPath(path string) {
+	dbPath = path
 }
 
 func initDB() (*sql.DB, error) {
+	if err := ensureConfigDir(); err != nil {
+		return nil, fmt.Errorf("cannot create config directory: %v", err)
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err

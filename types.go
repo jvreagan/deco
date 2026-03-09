@@ -91,19 +91,20 @@ type MeshDevice struct {
 
 // ReportDevice represents a device in a bandwidth report
 type ReportDevice struct {
-	MAC           string `json:"mac"`
-	Name          string `json:"name"`
-	IP            string `json:"ip"`
-	Connection    string `json:"connection"`
-	DeviceType    string `json:"device_type"`
-	SampleCount   int64  `json:"sample_count"`
-	TotalDownload int64  `json:"total_download"`
-	TotalUpload   int64  `json:"total_upload"`
-	MaxDownload   int64  `json:"max_download"`
-	MaxUpload     int64  `json:"max_upload"`
-	DownloadKB    int64  `json:"download_kb,omitempty"`
-	UploadKB      int64  `json:"upload_kb,omitempty"`
-	TotalKB       int64  `json:"total_kb,omitempty"`
+	MAC                 string           `json:"mac"`
+	Name                string           `json:"name"`
+	IP                  string           `json:"ip"`
+	Connection          string           `json:"connection"`
+	DeviceType          string           `json:"device_type"`
+	SampleCount         int64            `json:"sample_count"`
+	TotalDownload       int64            `json:"total_download"`
+	TotalUpload         int64            `json:"total_upload"`
+	MaxDownload         int64            `json:"max_download"`
+	MaxUpload           int64            `json:"max_upload"`
+	DownloadKB          int64            `json:"download_kb,omitempty"`
+	UploadKB            int64            `json:"upload_kb,omitempty"`
+	TotalKB             int64            `json:"total_kb,omitempty"`
+	ConnectionBreakdown map[string]int64 `json:"connection_breakdown,omitempty"`
 }
 
 // Report represents a bandwidth usage report
@@ -114,6 +115,28 @@ type Report struct {
 	IntervalSeconds int            `json:"interval_seconds"`
 	TotalSamples    int64          `json:"total_samples"`
 	Devices         []ReportDevice `json:"devices"`
+}
+
+// NetworkReportEntry represents a row in the network report.
+type NetworkReportEntry struct {
+	Timestamp string  `json:"timestamp"`
+	WANIP     string  `json:"wan_ip"`
+	Gateway   string  `json:"gateway"`
+	DNS1      string  `json:"dns1"`
+	DNS2      string  `json:"dns2"`
+	CPU       float64 `json:"cpu_percent"`
+	Memory    float64 `json:"mem_percent"`
+}
+
+// MeshReportEntry represents a row in the mesh report.
+type MeshReportEntry struct {
+	Timestamp string `json:"timestamp"`
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	IP        string `json:"ip"`
+	MAC       string `json:"mac"`
+	Status    string `json:"status"`
+	Firmware  string `json:"firmware"`
 }
 
 // AllInfo represents a complete network snapshot

@@ -13,7 +13,6 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -53,29 +52,20 @@ type DecoClient struct {
 }
 
 func loadConfig() (*Config, error) {
-	var configPath string
-	exe, err := os.Executable()
-	if err == nil {
-		configPath = filepath.Join(filepath.Dir(exe), "deco_config.json")
-	}
+	migrateIfNeeded()
 
-	var data []byte
-	if configPath != "" {
-		data, err = os.ReadFile(configPath)
-	}
-	if data == nil {
-		data, err = os.ReadFile("deco_config.json")
-		if err != nil {
-			return nil, fmt.Errorf("cannot find deco_config.json")
-		}
-		configPath = "deco_config.json"
+	configFile := cfgPath("deco_config.json")
+
+	data, err := os.ReadFile(configFile)
+	if err != nil {
+		return nil, fmt.Errorf("cannot find config file at %s\nRun 'deco setup' to create one", configFile)
 	}
 
 	// Warn if config file is world-readable
-	if info, statErr := os.Stat(configPath); statErr == nil {
+	if info, statErr := os.Stat(configFile); statErr == nil {
 		if info.Mode().Perm()&0077 != 0 {
 			logWarn("config %s is readable by other users (mode %o). Consider: chmod 600 %s",
-				configPath, info.Mode().Perm(), configPath)
+				configFile, info.Mode().Perm(), configFile)
 		}
 	}
 
