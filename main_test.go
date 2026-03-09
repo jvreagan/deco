@@ -1593,3 +1593,985 @@ func TestReportConnectionBreakdown(t *testing.T) {
 		t.Errorf("Wired count = %d, want 1", bd["Wired"])
 	}
 }
+
+// ==================== ESTIMATE INTERVAL TESTS ====================
+
+func TestEstimateInterval(t *testing.T) {
+	db := setupTestDB(t)
+
+	// No data → fallback to 5
+	got := estimateInterval(db, time.Time{})
+	if got != 5 {
+		t.Errorf("empty DB: estimateInterval = %d, want 5", got)
+	}
+
+	// Insert samples 60s apart
+	base := time.Now().Add(-10 * time.Minute)
+	for i := 0; i < 5; i++ {
+		ts := base.Add(time.Duration(i) * 60 * time.Second).Format(time.RFC3339)
+		db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+			VALUES (?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
+	}
+
+	got = estimateInterval(db, time.Time{})
+	if got != 60 {
+		t.Errorf("60s intervals: estimateInterval = %d, want 60", got)
+	}
+}
+
+func TestEstimateIntervalSingleSample(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
+
+	got := estimateInterval(db, time.Time{})
+	if got != 5 {
+		t.Errorf("single sample: estimateInterval = %d, want 5 (fallback)", got)
+	}
+}
+
+// ==================== runReport END-TO-END TESTS ====================
+
+func TestRunReportEndToEnd(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Insert samples at known timestamps
+	base := time.Now().Add(-1 * time.Hour)
+	for i := 0; i < 3; i++ {
+		ts := base.Add(time.Duration(i) * 5 * time.Second).Format(time.RFC3339)
+		db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			ts, "AA-BB-CC-DD-EE-FF", "TestPhone", "192.168.68.100", "WiFi 5GHz", "phone", 1000, 500)
+	}
+
+	// Capture stdout
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReport("today", false, "", "")
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReport failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "BANDWIDTH USAGE REPORT") {
+		t.Error("output should contain report header")
+	}
+	if !strings.Contains(output, "TestPhone") {
+		t.Error("output should contain device name")
+	}
+	if !strings.Contains(output, "TOTAL") {
+		t.Error("output should contain TOTAL row")
+	}
+}
+
+func TestRunReportJSON(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		ts, "AA-BB-CC-DD-EE-FF", "TestDev", "192.168.68.100", "WiFi 5GHz", "phone", 100, 50)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReport("today", true, "", "")
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReport JSON failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, `"period"`) {
+		t.Error("JSON output should contain period field")
+	}
+	if !strings.Contains(output, `"download_kb"`) {
+		t.Error("JSON output should contain download_kb field")
+	}
+}
+
+func TestRunReportWithNameFilter(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "MyPhone", "192.168.68.100", "WiFi 5GHz", 100, 50)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "11-22-33-44-55-66", "MyPC", "192.168.68.101", "Wired", 200, 100)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReport("today", false, "phone", "")
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReport with filter failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "MyPhone") {
+		t.Error("filtered output should contain MyPhone")
+	}
+	if strings.Contains(output, "MyPC") {
+		t.Error("filtered output should NOT contain MyPC")
+	}
+}
+
+func TestRunReportEmpty(t *testing.T) {
+	setupTestDB(t)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReport("today", false, "", "")
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReport empty failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "No data recorded") {
+		t.Error("empty report should say 'No data recorded'")
+	}
+}
+
+// ==================== runReportNetwork / runReportMesh END-TO-END ====================
+
+func TestRunReportNetworkEndToEnd(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, cpu_percent, mem_percent)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "1.2.3.4", "1.2.3.1", "8.8.8.8", "8.8.4.4", 15.0, 40.0)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReportNetwork("today", false)
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReportNetwork failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "NETWORK REPORT") {
+		t.Error("output should contain NETWORK REPORT")
+	}
+	if !strings.Contains(output, "1.2.3.4") {
+		t.Error("output should contain WAN IP")
+	}
+}
+
+func TestRunReportNetworkJSON(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, cpu_percent, mem_percent)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "1.2.3.4", "1.2.3.1", "8.8.8.8", "8.8.4.4", 15.0, 40.0)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReportNetwork("today", true)
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReportNetwork JSON failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, `"wan_ip"`) {
+		t.Error("JSON output should contain wan_ip field")
+	}
+}
+
+func TestRunReportMeshEndToEnd(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, status, firmware)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "Main", "master", "192.168.68.1", "8C-90-2D-B5-5F-86", "online", "1.2.10")
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReportMesh("today", false)
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReportMesh failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "MESH REPORT") {
+		t.Error("output should contain MESH REPORT")
+	}
+	if !strings.Contains(output, "Main") {
+		t.Error("output should contain node name")
+	}
+}
+
+func TestRunReportMeshJSON(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, status, firmware)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "Main", "master", "192.168.68.1", "8C-90-2D-B5-5F-86", "online", "1.2.10")
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReportMesh("today", true)
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReportMesh JSON failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, `"name"`) {
+		t.Error("JSON output should contain name field")
+	}
+}
+
+// ==================== runAlias TESTS ====================
+
+func TestRunAliasListEmpty(t *testing.T) {
+	testEnv(t)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runAlias(false, []string{})
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runAlias list empty failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "No aliases set") {
+		t.Error("empty alias list should say 'No aliases set'")
+	}
+}
+
+func TestRunAliasSetAndList(t *testing.T) {
+	testEnv(t)
+
+	err := runAlias(false, []string{"AA-BB-CC-DD-EE-FF", "My Phone"})
+	if err != nil {
+		t.Fatalf("runAlias set failed: %v", err)
+	}
+
+	// List and verify
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err = runAlias(false, []string{})
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runAlias list failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "AA-BB-CC-DD-EE-FF") {
+		t.Error("alias list should contain the MAC")
+	}
+	if !strings.Contains(output, "My Phone") {
+		t.Error("alias list should contain the alias name")
+	}
+}
+
+func TestRunAliasRemove(t *testing.T) {
+	testEnv(t)
+
+	// Set then remove
+	runAlias(false, []string{"AA-BB-CC-DD-EE-FF", "My Phone"})
+	err := runAlias(true, []string{"AA-BB-CC-DD-EE-FF"})
+	if err != nil {
+		t.Fatalf("runAlias remove failed: %v", err)
+	}
+
+	// Verify removed
+	aliases := loadAliases()
+	if _, ok := aliases["AA-BB-CC-DD-EE-FF"]; ok {
+		t.Error("alias should be removed")
+	}
+}
+
+func TestRunAliasRemoveNotFound(t *testing.T) {
+	testEnv(t)
+
+	err := runAlias(true, []string{"AA-BB-CC-DD-EE-FF"})
+	if err == nil {
+		t.Error("removing non-existent alias should return error")
+	}
+}
+
+func TestRunAliasInvalidMAC(t *testing.T) {
+	testEnv(t)
+
+	err := runAlias(false, []string{"not-a-mac", "name"})
+	if err == nil {
+		t.Error("setting alias with invalid MAC should return error")
+	}
+}
+
+func TestRunAliasRemoveInvalidMAC(t *testing.T) {
+	testEnv(t)
+
+	err := runAlias(true, []string{"not-a-mac"})
+	if err == nil {
+		t.Error("removing alias with invalid MAC should return error")
+	}
+}
+
+func TestRunAliasRemoveNoArgs(t *testing.T) {
+	testEnv(t)
+
+	err := runAlias(true, []string{})
+	if err == nil {
+		t.Error("remove with no args should return error")
+	}
+}
+
+func TestRunAliasTooFewArgs(t *testing.T) {
+	testEnv(t)
+
+	err := runAlias(false, []string{"AA-BB-CC-DD-EE-FF"})
+	if err == nil {
+		t.Error("alias with only MAC (no name) should return error")
+	}
+}
+
+// ==================== runBlock / runUnblock TESTS ====================
+
+func TestRunBlockInvalidMAC(t *testing.T) {
+	err := runBlock("not-a-mac")
+	if err == nil {
+		t.Error("runBlock with invalid MAC should return error")
+	}
+	if !strings.Contains(err.Error(), "invalid MAC") {
+		t.Errorf("error should mention invalid MAC, got: %v", err)
+	}
+}
+
+func TestRunUnblockInvalidMAC(t *testing.T) {
+	err := runUnblock("not-a-mac")
+	if err == nil {
+		t.Error("runUnblock with invalid MAC should return error")
+	}
+	if !strings.Contains(err.Error(), "invalid MAC") {
+		t.Errorf("error should mention invalid MAC, got: %v", err)
+	}
+}
+
+// ==================== runStatus TESTS ====================
+
+func TestRunStatusNoDB(t *testing.T) {
+	testEnv(t)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	runStatus()
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "No database found") {
+		t.Error("runStatus with no DB should say 'No database found'")
+	}
+}
+
+func TestRunStatusWithData(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "Dev1", 100, 50)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, ts, "11-22-33-44-55-66", "Dev2", 200, 100)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	runStatus()
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "Total samples: 2") {
+		t.Errorf("runStatus should show 2 total samples, got: %s", output)
+	}
+	if !strings.Contains(output, "Unique devices: 2") {
+		t.Errorf("runStatus should show 2 unique devices, got: %s", output)
+	}
+	if !strings.Contains(output, "Database:") {
+		t.Error("runStatus should show database path")
+	}
+}
+
+// ==================== runPurge TESTS ====================
+
+func TestRunPurgeNoDB(t *testing.T) {
+	testEnv(t)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	runPurge(true, "", 0)
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "No database found") {
+		t.Error("purge with no DB should say 'No database found'")
+	}
+}
+
+func TestRunPurgeForceAll(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
+	db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip) VALUES (?, ?)`, ts, "1.2.3.4")
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	runPurge(true, "", 0)
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "Purged all records") {
+		t.Errorf("force purge should say 'Purged all records', got: %s", output)
+	}
+
+	// Verify tables are empty
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&count)
+	if count != 0 {
+		t.Errorf("bandwidth_samples should be empty after purge, got %d", count)
+	}
+}
+
+func TestRunPurgeByDays(t *testing.T) {
+	db := setupTestDB(t)
+
+	oldTS := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
+	newTS := time.Now().Format(time.RFC3339)
+
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, oldTS, "AA-BB-CC-DD-EE-FF", "Old", 100, 50)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, newTS, "AA-BB-CC-DD-EE-FF", "New", 200, 100)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	runPurge(true, "", 7)
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "Purged") {
+		t.Errorf("purge by days should say 'Purged', got: %s", output)
+	}
+
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&count)
+	if count != 1 {
+		t.Errorf("should have 1 record remaining after purge, got %d", count)
+	}
+}
+
+func TestRunPurgeByBefore(t *testing.T) {
+	db := setupTestDB(t)
+
+	oldTS := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
+	newTS := time.Now().Format(time.RFC3339)
+
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, oldTS, "AA-BB-CC-DD-EE-FF", "Old", 100, 50)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, newTS, "AA-BB-CC-DD-EE-FF", "New", 200, 100)
+
+	beforeDate := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	runPurge(true, beforeDate, 0)
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "Purged") {
+		t.Errorf("purge by date should say 'Purged', got: %s", output)
+	}
+
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&count)
+	if count != 1 {
+		t.Errorf("should have 1 record remaining, got %d", count)
+	}
+}
+
+func TestRunPurgeInvalidDate(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
+
+	// Capture stderr to verify error message
+	oldErr := os.Stderr
+	rErr, wErr, _ := os.Pipe()
+	os.Stderr = wErr
+
+	runPurge(true, "not-a-date", 0)
+
+	wErr.Close()
+	os.Stderr = oldErr
+
+	var buf bytes.Buffer
+	buf.ReadFrom(rErr)
+	output := buf.String()
+
+	if !strings.Contains(output, "invalid date") {
+		t.Errorf("purge with bad date should say 'invalid date', got: %s", output)
+	}
+}
+
+// ==================== countBeforeDate TESTS ====================
+
+func TestCountBeforeDate(t *testing.T) {
+	db := setupTestDB(t)
+
+	oldTS := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
+	newTS := time.Now().Format(time.RFC3339)
+
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, oldTS, "AA-BB-CC-DD-EE-FF", "Old", 100, 50)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, newTS, "AA-BB-CC-DD-EE-FF", "New", 200, 100)
+	db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip) VALUES (?, ?)`, oldTS, "1.2.3.4")
+	db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role) VALUES (?, ?, ?)`, oldTS, "Main", "master")
+	db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid) VALUES (?, ?, ?)`, oldTS, "5GHz", "Net")
+
+	cutoff := time.Now().AddDate(0, 0, -7)
+	count, err := countBeforeDate(db, cutoff)
+	if err != nil {
+		t.Fatalf("countBeforeDate failed: %v", err)
+	}
+	if count != 4 {
+		t.Errorf("countBeforeDate = %d, want 4 (1 per table)", count)
+	}
+}
+
+func TestCountBeforeDateEmpty(t *testing.T) {
+	db := setupTestDB(t)
+
+	cutoff := time.Now().AddDate(0, 0, -7)
+	count, err := countBeforeDate(db, cutoff)
+	if err != nil {
+		t.Fatalf("countBeforeDate failed: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("countBeforeDate on empty DB = %d, want 0", count)
+	}
+}
+
+// ==================== checkDBCapacity TESTS ====================
+
+func TestCheckDBCapacity(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Should not panic on a small DB
+	checkDBCapacity(db)
+}
+
+// ==================== printJSON TESTS ====================
+
+func TestPrintJSON(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printJSON(map[string]string{"key": "value"})
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, `"key": "value"`) {
+		t.Errorf("printJSON output should contain key/value, got: %s", output)
+	}
+}
+
+// ==================== printDBLimitError TESTS ====================
+
+func TestPrintDBLimitError(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printDBLimitError(300*1024*1024*1024, "Poll")
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "DATABASE SIZE LIMIT EXCEEDED") {
+		t.Error("should contain limit exceeded message")
+	}
+	if !strings.Contains(output, "Poll") {
+		t.Error("should contain the action label")
+	}
+}
+
+// ==================== runVersion TESTS ====================
+
+func TestRunVersion(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	runVersion()
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, version) {
+		t.Errorf("runVersion should print version %q, got: %s", version, output)
+	}
+}
+
+// ==================== Cobra subcommand TESTS ====================
+
+func TestCompletionSubcommand(t *testing.T) {
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	rootCmd.SetArgs([]string{"--help"})
+	rootCmd.Execute()
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "completion") {
+		t.Error("root help should list completion subcommand")
+	}
+}
+
+// ==================== NETWORK-DEPENDENT COMMAND ERROR TESTS ====================
+
+func TestRunNetworkNoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runNetwork(false); err == nil {
+		t.Error("runNetwork should return error without config")
+	}
+}
+
+func TestRunWirelessNoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runWireless(false); err == nil {
+		t.Error("runWireless should return error without config")
+	}
+}
+
+func TestRunMeshNoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runMesh(false); err == nil {
+		t.Error("runMesh should return error without config")
+	}
+}
+
+func TestRunAllNoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runAll(); err == nil {
+		t.Error("runAll should return error without config")
+	}
+}
+
+func TestRunAPINoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runAPI("test", "{}"); err == nil {
+		t.Error("runAPI should return error without config")
+	}
+}
+
+func TestRunRebootNoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runReboot(true); err == nil {
+		t.Error("runReboot should return error without config")
+	}
+}
+
+func TestRunBlockNoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runBlock("AA-BB-CC-DD-EE-FF"); err == nil {
+		t.Error("runBlock should return error without config")
+	}
+}
+
+func TestRunUnblockNoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runUnblock("AA-BB-CC-DD-EE-FF"); err == nil {
+		t.Error("runUnblock should return error without config")
+	}
+}
+
+func TestRunWatchNoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runWatch(5, "", ""); err == nil {
+		t.Error("runWatch should return error without config")
+	}
+}
+
+func TestRunPollNoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runPoll(5); err == nil {
+		t.Error("runPoll should return error without config")
+	}
+}
+
+func TestRunMonitorNoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	if err := runMonitor(60, false); err == nil {
+		t.Error("runMonitor should return error without config")
+	}
+}
+
+// ==================== logError TESTS ====================
+
+func TestLogError(t *testing.T) {
+	origLevel := logLevel
+	defer func() { logLevel = origLevel }()
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	logLevel = LevelError
+	logError("test error message")
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	output := string(buf[:n])
+
+	if !strings.Contains(output, "test error message") {
+		t.Error("logError should output the message")
+	}
+	if !strings.Contains(output, "ERR") {
+		t.Error("logError should contain ERR prefix")
+	}
+}
+
+// ==================== filterClients with alias TESTS ====================
+
+func TestFilterClientsByAlias(t *testing.T) {
+	testEnv(t)
+
+	// Set an alias
+	aliases := map[string]string{"AA-BB-CC-DD-EE-FF": "FriendlyName"}
+	saveAliases(aliases)
+
+	data := &ClientList{
+		Clients: []ClientInfo{
+			{Name: "garbled_name", IP: "192.168.68.100", MAC: "AA-BB-CC-DD-EE-FF"},
+			{Name: "OtherDevice", IP: "192.168.68.101", MAC: "11-22-33-44-55-66"},
+		},
+		Count: 2,
+	}
+
+	// Filter by alias name
+	filtered := filterClients(data, "friendly", "")
+	if len(filtered.Clients) != 1 {
+		t.Fatalf("expected 1 client matching alias, got %d", len(filtered.Clients))
+	}
+	if filtered.Clients[0].MAC != "AA-BB-CC-DD-EE-FF" {
+		t.Error("filtered client should match by alias")
+	}
+}
+
+// ==================== printNetworkReport with data TESTS ====================
+
+func TestPrintNetworkReportWithIPChanges(t *testing.T) {
+	entries := []NetworkReportEntry{
+		{Timestamp: "2026-03-08T10:00:00Z", WANIP: "1.2.3.4", Gateway: "1.2.3.1", DNS1: "8.8.8.8", DNS2: "8.8.4.4", CPU: 10, Memory: 20},
+		{Timestamp: "2026-03-08T11:00:00Z", WANIP: "5.6.7.8", Gateway: "5.6.7.1", DNS1: "8.8.8.8", DNS2: "8.8.4.4", CPU: 30, Memory: 40},
+		{Timestamp: "2026-03-08T12:00:00Z", WANIP: "5.6.7.8", Gateway: "5.6.7.1", DNS1: "8.8.8.8", DNS2: "8.8.4.4", CPU: 20, Memory: 30},
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printNetworkReport(entries, "Today")
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	// Should show both IPs in WAN history
+	if !strings.Contains(output, "1.2.3.4") {
+		t.Error("should contain first WAN IP")
+	}
+	if !strings.Contains(output, "5.6.7.8") {
+		t.Error("should contain second WAN IP")
+	}
+	if !strings.Contains(output, "Performance") {
+		t.Error("should contain Performance section")
+	}
+	// avg CPU = (10+30+20)/3 = 20
+	if !strings.Contains(output, "20.0%") {
+		t.Error("should contain avg CPU 20.0%")
+	}
+}

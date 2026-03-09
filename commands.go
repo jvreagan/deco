@@ -601,6 +601,45 @@ func parsePeriod(period string) (time.Time, string) {
 	}
 }
 
+// estimateInterval derives the polling interval from sample timestamps.
+// Returns the median gap between consecutive distinct timestamps, or 5 as fallback.
+func estimateInterval(db *sql.DB, since time.Time) int {
+	rows, err := db.Query(`SELECT DISTINCT timestamp FROM bandwidth_samples
+		WHERE timestamp >= ? ORDER BY timestamp LIMIT 20`, since.Format(time.RFC3339))
+	if err != nil {
+		return 5
+	}
+	defer rows.Close()
+
+	var timestamps []time.Time
+	for rows.Next() {
+		var ts string
+		if err := rows.Scan(&ts); err == nil {
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				timestamps = append(timestamps, t)
+			}
+		}
+	}
+
+	if len(timestamps) < 2 {
+		return 5
+	}
+
+	var gaps []int
+	for i := 1; i < len(timestamps); i++ {
+		gap := int(timestamps[i].Sub(timestamps[i-1]).Seconds())
+		if gap > 0 {
+			gaps = append(gaps, gap)
+		}
+	}
+	if len(gaps) == 0 {
+		return 5
+	}
+
+	sort.Ints(gaps)
+	return gaps[len(gaps)/2] // median
+}
+
 func runReport(period string, jsonOut bool, nameFilter, macFilter string) error {
 	db, err := initDB()
 	if err != nil {
@@ -713,11 +752,13 @@ func runReport(period string, jsonOut bool, nameFilter, macFilter string) error 
 		fmt.Fprintf(os.Stderr, "Warning: failed to count samples: %v\n", err)
 	}
 
+	intervalSec := estimateInterval(db, startTime)
+
 	report := &Report{
 		Period:          periodName,
 		StartTime:       startTime.Format(time.RFC3339),
 		QueryTime:       time.Now().Format(time.RFC3339),
-		IntervalSeconds: 5,
+		IntervalSeconds: intervalSec,
 		TotalSamples:    totalSamples,
 		Devices:         devices,
 	}
@@ -816,7 +857,7 @@ func runStatus() {
 		return
 	}
 
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := initDB()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return
