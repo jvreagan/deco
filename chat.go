@@ -42,8 +42,32 @@ func checkOllama(ollamaURL string) error {
 	return nil
 }
 
+// Context limits to keep the system prompt within reasonable token budgets.
+const (
+	maxBandwidthDevices = 15
+	maxKnownDevices     = 50
+	maxNetworkSnapshots = 200
+	maxMeshSnapshots    = 200
+	// Compact mode limits
+	compactBandwidthDevices = 10
+	compactKnownDevices     = 25
+	compactNetworkSnapshots = 50
+	compactMeshSnapshots    = 50
+)
+
 // gatherNetworkContext builds a structured text prompt with live router data and/or DB history.
-func gatherNetworkContext() string {
+// When compact is true, limits are tighter to fit smaller context windows.
+func gatherNetworkContext(compact bool) string {
+	bandwidthLimit := maxBandwidthDevices
+	knownLimit := maxKnownDevices
+	netSnapLimit := maxNetworkSnapshots
+	meshSnapLimit := maxMeshSnapshots
+	if compact {
+		bandwidthLimit = compactBandwidthDevices
+		knownLimit = compactKnownDevices
+		netSnapLimit = compactNetworkSnapshots
+		meshSnapLimit = compactMeshSnapshots
+	}
 	var sb strings.Builder
 	sb.WriteString("You are a network assistant for a TP-Link Deco mesh router system.\n")
 	sb.WriteString("Answer questions about the network data below. Be concise.\n")
@@ -151,7 +175,7 @@ func gatherNetworkContext() string {
 		todayStr := startOfDay.Format(time.RFC3339)
 
 		// Top bandwidth today
-		if rows, err := db.Query(`
+		if rows, err := db.Query(fmt.Sprintf(`
 			SELECT mac, name,
 				SUM(download_kbps) as total_download,
 				SUM(upload_kbps) as total_upload
@@ -159,8 +183,8 @@ func gatherNetworkContext() string {
 			WHERE timestamp >= ?
 			GROUP BY mac
 			ORDER BY (total_download + total_upload) DESC
-			LIMIT 10
-		`, todayStr); err == nil {
+			LIMIT %d
+		`, bandwidthLimit), todayStr); err == nil {
 			defer rows.Close()
 			var entries []struct {
 				mac, name string
@@ -202,12 +226,13 @@ func gatherNetworkContext() string {
 		}
 
 		// WAN IP history + performance (today)
-		if rows, err := db.Query(`
+		if rows, err := db.Query(fmt.Sprintf(`
 			SELECT timestamp, wan_ip,
 				COALESCE(cpu_percent, 0), COALESCE(mem_percent, 0)
 			FROM network_snapshots
 			WHERE timestamp >= ?
-			ORDER BY timestamp`, todayStr); err == nil {
+			ORDER BY timestamp
+			LIMIT %d`, netSnapLimit), todayStr); err == nil {
 			defer rows.Close()
 			type netSnap struct {
 				ts, ip string
@@ -256,11 +281,12 @@ func gatherNetworkContext() string {
 		}
 
 		// Mesh node uptime (today)
-		if rows, err := db.Query(`
+		if rows, err := db.Query(fmt.Sprintf(`
 			SELECT name, role, mac, status, firmware
 			FROM mesh_snapshots
 			WHERE timestamp >= ?
-			ORDER BY timestamp`, todayStr); err == nil {
+			ORDER BY timestamp
+			LIMIT %d`, meshSnapLimit), todayStr); err == nil {
 			defer rows.Close()
 			type nodeStats struct {
 				name, role, firmware string
@@ -297,12 +323,12 @@ func gatherNetworkContext() string {
 		}
 
 		// All known MACs ever seen (for "have you seen device X?" type questions)
-		if rows, err := db.Query(`
+		if rows, err := db.Query(fmt.Sprintf(`
 			SELECT mac, name, MAX(timestamp) as last_seen, COUNT(*) as samples
 			FROM bandwidth_samples
 			GROUP BY mac
 			ORDER BY last_seen DESC
-			LIMIT 50`); err == nil {
+			LIMIT %d`, knownLimit)); err == nil {
 			defer rows.Close()
 			type knownDev struct {
 				mac, name, lastSeen string
@@ -395,7 +421,7 @@ func streamOllamaChat(ollamaURL string, req ollamaChatRequest, w io.Writer) (str
 }
 
 // runChat is the main entry point for the chat command.
-func runChat(model, ollamaURL, query string) error {
+func runChat(model, ollamaURL, query string, compact bool) error {
 	// Resolve OLLAMA_HOST env var as fallback
 	if ollamaURL == "http://localhost:11434" {
 		if host := os.Getenv("OLLAMA_HOST"); host != "" {
@@ -408,7 +434,7 @@ func runChat(model, ollamaURL, query string) error {
 	}
 
 	fmt.Fprint(os.Stderr, "Gathering network data... ")
-	systemPrompt := gatherNetworkContext()
+	systemPrompt := gatherNetworkContext(compact)
 	fmt.Fprintln(os.Stderr, "done.")
 
 	messages := []ollamaMessage{
@@ -449,7 +475,7 @@ func runChat(model, ollamaURL, query string) error {
 		}
 		if input == "refresh" {
 			fmt.Fprint(os.Stderr, "Refreshing network data... ")
-			systemPrompt = gatherNetworkContext()
+			systemPrompt = gatherNetworkContext(compact)
 			messages = []ollamaMessage{
 				{Role: "system", Content: systemPrompt},
 			}

@@ -360,15 +360,17 @@ Requires Ollama running locally (ollama serve). Set OLLAMA_HOST to override URL.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			model, _ := cmd.Flags().GetString("model")
 			url, _ := cmd.Flags().GetString("ollama-url")
+			compact, _ := cmd.Flags().GetBool("compact")
 			query := ""
 			if len(args) > 0 {
 				query = args[0]
 			}
-			return runChat(model, url, query)
+			return runChat(model, url, query, compact)
 		},
 	}
 	cmd.Flags().String("model", "llama3.2", "Ollama model to use")
 	cmd.Flags().String("ollama-url", "http://localhost:11434", "Ollama API base URL")
+	cmd.Flags().Bool("compact", false, "Use smaller context window (fewer devices/snapshots)")
 	return cmd
 }
 

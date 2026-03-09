@@ -201,7 +201,7 @@ func TestGatherNetworkContextDBOnly(t *testing.T) {
 		t.Fatalf("insert failed: %v", err)
 	}
 
-	ctx := gatherNetworkContext()
+	ctx := gatherNetworkContext(false)
 
 	// Should contain the system prompt header
 	if !strings.Contains(ctx, "network assistant") {
@@ -223,7 +223,7 @@ func TestGatherNetworkContextDBOnly(t *testing.T) {
 func TestGatherNetworkContextEmpty(t *testing.T) {
 	testEnv(t) // isolate config — no DB data, no router
 
-	ctx := gatherNetworkContext()
+	ctx := gatherNetworkContext(false)
 
 	// Should still return a valid prompt
 	if !strings.Contains(ctx, "network assistant") {
@@ -263,7 +263,7 @@ func TestGatherNetworkContextAliasSubstitution(t *testing.T) {
 		t.Fatalf("insert failed: %v", err)
 	}
 
-	ctx := gatherNetworkContext()
+	ctx := gatherNetworkContext(false)
 
 	// Alias should appear instead of original name
 	if !strings.Contains(ctx, "Living Room TV") {
@@ -292,7 +292,7 @@ func TestGatherNetworkContextMultipleDevicesOrdered(t *testing.T) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, "AA-BB-CC-DD-EE-FF", "BigDevice", "192.168.68.102", "WiFi 5GHz", "pc", 50000, 10000)
 
-	ctx := gatherNetworkContext()
+	ctx := gatherNetworkContext(false)
 
 	if !strings.Contains(ctx, "TOP BANDWIDTH TODAY") {
 		t.Fatal("expected bandwidth section")
@@ -324,7 +324,7 @@ func TestGatherNetworkContextNoNameFallsBackToMAC(t *testing.T) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, "AA-BB-CC-DD-EE-FF", "", "192.168.68.100", "Wired", "unknown", 1000, 200)
 
-	ctx := gatherNetworkContext()
+	ctx := gatherNetworkContext(false)
 
 	// Should fall back to MAC address as display name
 	if !strings.Contains(ctx, "AA-BB-CC-DD-EE-FF") {
@@ -341,7 +341,7 @@ func TestGatherNetworkContextAliasesListed(t *testing.T) {
 	}
 	saveAliases(aliases)
 
-	ctx := gatherNetworkContext()
+	ctx := gatherNetworkContext(false)
 
 	if !strings.Contains(ctx, "KNOWN DEVICES (aliases)") {
 		t.Error("expected 'KNOWN DEVICES (aliases)' section")
@@ -369,7 +369,7 @@ func TestGatherNetworkContextNetworkSnapshots(t *testing.T) {
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		ts, "1.2.3.4", "1.2.3.1", "8.8.8.8", "8.8.4.4", 15.0, 42.0)
 
-	ctx := gatherNetworkContext()
+	ctx := gatherNetworkContext(false)
 
 	if !strings.Contains(ctx, "WAN IP HISTORY") {
 		t.Error("expected 'WAN IP HISTORY' section")
@@ -401,7 +401,7 @@ func TestGatherNetworkContextMeshSnapshots(t *testing.T) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, "Deco_5F8C", "slave", "192.168.71.250", "8C-90-2D-B5-5F-8C", "BE63", "1.2.10", "online")
 
-	ctx := gatherNetworkContext()
+	ctx := gatherNetworkContext(false)
 
 	if !strings.Contains(ctx, "MESH NODE UPTIME") {
 		t.Error("expected 'MESH NODE UPTIME' section")
@@ -434,7 +434,7 @@ func TestGatherNetworkContextAllKnownDevices(t *testing.T) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, "11-22-33-44-55-66", "DeviceB", "192.168.68.101", "WiFi 5GHz", "phone", 500, 50)
 
-	ctx := gatherNetworkContext()
+	ctx := gatherNetworkContext(false)
 
 	if !strings.Contains(ctx, "ALL KNOWN DEVICES") {
 		t.Error("expected 'ALL KNOWN DEVICES' section")
@@ -447,10 +447,49 @@ func TestGatherNetworkContextAllKnownDevices(t *testing.T) {
 	}
 }
 
+func TestGatherNetworkContextCompactMode(t *testing.T) {
+	testEnv(t)
+
+	db, err := initDB()
+	if err != nil {
+		t.Fatalf("initDB failed: %v", err)
+	}
+	defer db.Close()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	// Insert 30 devices — compact should show fewer
+	for i := 0; i < 30; i++ {
+		mac := fmt.Sprintf("AA-BB-CC-DD-%02X-%02X", i/256, i%256)
+		name := fmt.Sprintf("Device%d", i)
+		_, _ = db.Exec(`INSERT INTO bandwidth_samples
+			(timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			ts, mac, name, "192.168.68.100", "Wired", "pc", (30-i)*100, (30-i)*10)
+	}
+
+	full := gatherNetworkContext(false)
+	compact := gatherNetworkContext(true)
+
+	// Compact context should be shorter than full
+	if len(compact) >= len(full) {
+		t.Errorf("expected compact (%d bytes) < full (%d bytes)", len(compact), len(full))
+	}
+
+	// Both should have the essential sections
+	for _, ctx := range []string{full, compact} {
+		if !strings.Contains(ctx, "TOP BANDWIDTH TODAY") {
+			t.Error("expected bandwidth section")
+		}
+		if !strings.Contains(ctx, "ALL KNOWN DEVICES") {
+			t.Error("expected known devices section")
+		}
+	}
+}
+
 // ==================== RUNCHAT TESTS ====================
 
 func TestRunChatOllamaDown(t *testing.T) {
-	err := runChat("llama3.2", "http://127.0.0.1:1", "test question")
+	err := runChat("llama3.2", "http://127.0.0.1:1", "test question", false)
 	if err == nil {
 		t.Fatal("expected error when Ollama is down")
 	}
@@ -507,7 +546,7 @@ func TestRunChatSingleShot(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := runChat("llama3.2", ts.URL, "how many devices?")
+	err := runChat("llama3.2", ts.URL, "how many devices?", false)
 
 	w.Close()
 	os.Stdout = old
@@ -552,7 +591,7 @@ func TestRunChatOllamaHostEnvVar(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := runChat("llama3.2", "http://localhost:11434", "test")
+	err := runChat("llama3.2", "http://localhost:11434", "test", false)
 
 	w.Close()
 	os.Stdout = old
@@ -612,7 +651,7 @@ func TestRunChatSystemPromptContainsContext(t *testing.T) {
 	_, w, _ := os.Pipe()
 	os.Stdout = w
 
-	runChat("llama3.2", mockServer.URL, "test")
+	runChat("llama3.2", mockServer.URL, "test", false)
 
 	w.Close()
 	os.Stdout = old
