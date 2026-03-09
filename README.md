@@ -45,7 +45,8 @@ deco clients
 | `monitor` | Full network monitoring — logs all data to SQLite |
 | `report [period]` | Show bandwidth usage report (`today`, `hour`, or `all`) |
 | `status` | Show database statistics (size, record counts, date range) |
-| `purge` | Delete all database records |
+| `purge` | Delete database records (all, or by `--days`/`--before`) |
+| `chat [question]` | Ask questions about your network using a local Ollama LLM |
 | `api <endpoint> [body]` | Call a raw API endpoint |
 | `version` | Show version |
 | `reboot` | Reboot the router (confirms first, use `--force` to skip) |
@@ -64,6 +65,12 @@ deco clients
 | `--name`, `-n <name>` | Filter by device name — substring, case-insensitive (`clients`, `report`) |
 | `--mac`, `-m <MAC>` | Filter by MAC address — exact match, case-insensitive (`clients`, `report`) |
 | `--watch`, `-w` | Auto-refresh client list (use with `clients`) |
+| `--notify` | Alert on new MAC addresses (use with `monitor`) |
+| `--days N` | Purge records older than N days (use with `purge`) |
+| `--before YYYY-MM-DD` | Purge records before date (use with `purge`) |
+| `--model <name>` | Ollama model to use (default: `llama3.2`, use with `chat`) |
+| `--ollama-url <url>` | Ollama API base URL (use with `chat`) |
+| `--compact` | Use smaller context window for chat (use with `chat`) |
 
 ### Device Aliases
 
@@ -75,7 +82,7 @@ deco alias AA-BB-CC-DD-EE-FF "TV"       # Set an alias
 deco alias --remove AA-BB-CC-DD-EE-FF   # Remove an alias
 ```
 
-Aliases are stored in `deco_aliases.json` next to the binary and are applied in `clients` and `report` output.
+Aliases are stored in `~/.config/deco/deco_aliases.json` and are applied in `clients`, `report`, and `chat` output.
 
 ### Examples
 
@@ -90,12 +97,17 @@ deco report today            # Today's bandwidth by device
 deco report hour --json      # Last hour as JSON
 deco reboot --force          # Reboot without confirmation
 deco block AA-BB-CC-DD-EE-FF # Block a device
+deco purge --days 30           # Delete records older than 30 days
+deco purge --before 2025-01-01 # Delete records before a date
+deco chat "how many devices?"  # Single AI question
+deco chat                      # Interactive AI chat session
+deco chat --compact "status?"  # Use smaller context for small models
 deco api 'admin/client?form=client_list' '{"operation":"read"}'
 ```
 
 ## Configuration
 
-Run `deco setup` to create the config file interactively, or create `deco_config.json` manually next to the binary:
+Run `deco setup` to create the config file interactively, or create it manually at `~/.config/deco/deco_config.json`:
 
 ```json
 {
@@ -105,6 +117,21 @@ Run `deco setup` to create the config file interactively, or create `deco_config
 ```
 
 The password is your Deco admin/management password (the one you use to log in to the web UI or app).
+
+Config files are stored in `~/.config/deco/` (respects `$XDG_CONFIG_HOME`). Legacy files next to the binary are auto-migrated on first run.
+
+### AI Chat
+
+The `chat` command requires [Ollama](https://ollama.ai) running locally:
+
+```bash
+brew install ollama
+brew services start ollama
+ollama pull llama3.2
+deco chat "which device used the most bandwidth today?"
+```
+
+The AI has access to live router data (connected devices, mesh status, WiFi config) and historical data from the SQLite database (bandwidth trends, WAN IP history, mesh uptime, all known devices). Set `OLLAMA_HOST` to use a remote Ollama instance.
 
 ## Building
 

@@ -688,6 +688,14 @@ func TestChatCmdDefaults(t *testing.T) {
 	if url != "http://localhost:11434" {
 		t.Errorf("expected default URL 'http://localhost:11434', got %q", url)
 	}
+
+	compact, err := cmd.Flags().GetBool("compact")
+	if err != nil {
+		t.Fatalf("compact flag error: %v", err)
+	}
+	if compact != false {
+		t.Errorf("expected default compact=false, got %v", compact)
+	}
 }
 
 func TestChatCmdAcceptsOptionalArg(t *testing.T) {
