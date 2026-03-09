@@ -43,6 +43,7 @@ func init() {
 		blockCmd(),
 		unblockCmd(),
 		aliasCmd(),
+		chatCmd(),
 		completionCmd(),
 	)
 }
@@ -342,6 +343,32 @@ Usage:
 		Args: cobra.ArbitraryArgs,
 	}
 	cmd.Flags().BoolP("remove", "r", false, "Remove an alias")
+	return cmd
+}
+
+func chatCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "chat [question]",
+		Short: "Ask questions about your network using AI",
+		Long: `Ask natural language questions about your network using a local Ollama LLM.
+
+  deco chat "how many devices are connected?"   Single question
+  deco chat                                      Interactive chat session
+
+Requires Ollama running locally (ollama serve). Set OLLAMA_HOST to override URL.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			model, _ := cmd.Flags().GetString("model")
+			url, _ := cmd.Flags().GetString("ollama-url")
+			query := ""
+			if len(args) > 0 {
+				query = args[0]
+			}
+			return runChat(model, url, query)
+		},
+	}
+	cmd.Flags().String("model", "llama3.2", "Ollama model to use")
+	cmd.Flags().String("ollama-url", "http://localhost:11434", "Ollama API base URL")
 	return cmd
 }
 
