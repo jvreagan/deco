@@ -73,6 +73,7 @@ deco clients
 | `--model <name>` | Ollama model to use (default: `llama3.2`, use with `chat`) |
 | `--ollama-url <url>` | Ollama API base URL (use with `chat`) |
 | `--compact` | Use smaller context window for chat (use with `chat`) |
+| `--list-models` | List available Ollama models and exit (use with `chat`) |
 
 ### Device Aliases
 

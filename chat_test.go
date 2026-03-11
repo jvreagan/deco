@@ -919,3 +919,214 @@ func TestRunChatREPLSave(t *testing.T) {
 	}
 }
 
+// ==================== LIST MODELS TESTS ====================
+
+func TestListOllamaModels(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			t.Errorf("expected /api/tags, got %s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"models":[
+			{"name":"llama3.2:latest","size":2019393189,"modified_at":"2025-12-01T10:30:00Z"},
+			{"name":"mistral:latest","size":4109394944,"modified_at":"2025-11-15T08:00:00Z"}
+		]}`)
+	}))
+	defer ts.Close()
+
+	// Capture stdout
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := listOllamaModels(ts.URL)
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "llama3.2:latest") {
+		t.Error("expected 'llama3.2:latest' in output")
+	}
+	if !strings.Contains(output, "mistral:latest") {
+		t.Error("expected 'mistral:latest' in output")
+	}
+	if !strings.Contains(output, "NAME") {
+		t.Error("expected header row")
+	}
+}
+
+func TestListOllamaModelsEmpty(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"models":[]}`)
+	}))
+	defer ts.Close()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := listOllamaModels(ts.URL)
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	if !strings.Contains(buf.String(), "No models installed") {
+		t.Error("expected 'No models installed' message")
+	}
+}
+
+func TestListOllamaModelsUnreachable(t *testing.T) {
+	err := listOllamaModels("http://127.0.0.1:1")
+	if err == nil {
+		t.Fatal("expected error for unreachable Ollama")
+	}
+	if !strings.Contains(err.Error(), "cannot reach Ollama") {
+		t.Errorf("expected helpful error, got: %v", err)
+	}
+}
+
+func TestChatCmdListModelsFlag(t *testing.T) {
+	cmd := chatCmd()
+	lm, err := cmd.Flags().GetBool("list-models")
+	if err != nil {
+		t.Fatalf("list-models flag error: %v", err)
+	}
+	if lm != false {
+		t.Error("expected default list-models=false")
+	}
+}
+
+// ==================== REFRESH DIFF TESTS ====================
+
+func TestParseNetworkSnapshot(t *testing.T) {
+	prompt := `You are a network assistant.
+
+=== CONNECTED DEVICES (3) ===
+NAME                      IP               MAC                CONNECTION     DOWN       UP
+Jamess-MBP                192.168.68.50    8C-85-90-89-F5-DA  WiFi 5GHz      120KB/s    5KB/s
+XBOX                      192.168.68.71    68-6C-E6-F2-75-5B  WiFi 5GHz      -          -
+Printer                   192.168.68.74    90-CD-B6-54-18-89  Wired          -          -
+
+=== NETWORK ===
+WAN IP: 1.2.3.4 | Gateway: 1.2.3.1 | CPU: 15% | Memory: 42%
+`
+
+	snap := parseNetworkSnapshot(prompt)
+
+	if snap.DeviceCount != 3 {
+		t.Errorf("expected 3 devices, got %d", snap.DeviceCount)
+	}
+	if snap.WAN_IP != "1.2.3.4" {
+		t.Errorf("expected WAN IP '1.2.3.4', got %q", snap.WAN_IP)
+	}
+	if len(snap.DeviceMACs) != 3 {
+		t.Errorf("expected 3 MAC entries, got %d", len(snap.DeviceMACs))
+	}
+	if name, ok := snap.DeviceMACs["8C-85-90-89-F5-DA"]; !ok || name != "Jamess-MBP" {
+		t.Errorf("expected Jamess-MBP for 8C-85-90-89-F5-DA, got %q (ok=%v)", name, ok)
+	}
+}
+
+func TestDiffNetworkSnapshotsNewDevice(t *testing.T) {
+	old := networkSnapshot{
+		DeviceCount: 2,
+		DeviceMACs: map[string]string{
+			"AA-BB-CC-DD-EE-FF": "DeviceA",
+			"11-22-33-44-55-66": "DeviceB",
+		},
+		WAN_IP: "1.2.3.4",
+	}
+	new := networkSnapshot{
+		DeviceCount: 3,
+		DeviceMACs: map[string]string{
+			"AA-BB-CC-DD-EE-FF": "DeviceA",
+			"11-22-33-44-55-66": "DeviceB",
+			"77-88-99-AA-BB-CC": "NewDevice",
+		},
+		WAN_IP: "1.2.3.4",
+	}
+
+	diff := diffNetworkSnapshots(old, new)
+
+	if !strings.Contains(diff, "2 → 3") {
+		t.Errorf("expected device count change, got: %s", diff)
+	}
+	if !strings.Contains(diff, "+ NewDevice") {
+		t.Errorf("expected new device indicator, got: %s", diff)
+	}
+}
+
+func TestDiffNetworkSnapshotsDepartedDevice(t *testing.T) {
+	old := networkSnapshot{
+		DeviceCount: 2,
+		DeviceMACs: map[string]string{
+			"AA-BB-CC-DD-EE-FF": "DeviceA",
+			"11-22-33-44-55-66": "DeviceB",
+		},
+	}
+	new := networkSnapshot{
+		DeviceCount: 1,
+		DeviceMACs: map[string]string{
+			"AA-BB-CC-DD-EE-FF": "DeviceA",
+		},
+	}
+
+	diff := diffNetworkSnapshots(old, new)
+
+	if !strings.Contains(diff, "2 → 1") {
+		t.Errorf("expected device count change, got: %s", diff)
+	}
+	if !strings.Contains(diff, "- DeviceB") {
+		t.Errorf("expected departed device indicator, got: %s", diff)
+	}
+}
+
+func TestDiffNetworkSnapshotsWANChange(t *testing.T) {
+	old := networkSnapshot{
+		DeviceCount: 1,
+		DeviceMACs:  map[string]string{"AA-BB-CC-DD-EE-FF": "A"},
+		WAN_IP:      "1.2.3.4",
+	}
+	new := networkSnapshot{
+		DeviceCount: 1,
+		DeviceMACs:  map[string]string{"AA-BB-CC-DD-EE-FF": "A"},
+		WAN_IP:      "5.6.7.8",
+	}
+
+	diff := diffNetworkSnapshots(old, new)
+
+	if !strings.Contains(diff, "1.2.3.4 → 5.6.7.8") {
+		t.Errorf("expected WAN IP change, got: %s", diff)
+	}
+}
+
+func TestDiffNetworkSnapshotsNoChange(t *testing.T) {
+	snap := networkSnapshot{
+		DeviceCount: 2,
+		DeviceMACs: map[string]string{
+			"AA-BB-CC-DD-EE-FF": "A",
+			"11-22-33-44-55-66": "B",
+		},
+		WAN_IP: "1.2.3.4",
+	}
+
+	diff := diffNetworkSnapshots(snap, snap)
+
+	if !strings.Contains(diff, "no change") {
+		t.Errorf("expected 'no change', got: %s", diff)
+	}
+}
+

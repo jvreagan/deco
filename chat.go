@@ -43,6 +43,46 @@ func isTerminal(f *os.File) bool {
 	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
+// ollamaModelInfo represents a model from the Ollama API.
+type ollamaModelInfo struct {
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	ModifiedAt string `json:"modified_at"`
+}
+
+// listOllamaModels queries the Ollama API for available models and prints them.
+func listOllamaModels(ollamaURL string) error {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(ollamaURL + "/api/tags")
+	if err != nil {
+		return fmt.Errorf("cannot reach Ollama at %s: %v\nIs Ollama running? Start it with: ollama serve", ollamaURL, err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Models []ollamaModelInfo `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to parse model list: %v", err)
+	}
+
+	if len(result.Models) == 0 {
+		fmt.Println("No models installed. Pull one with: ollama pull llama3.2")
+		return nil
+	}
+
+	fmt.Printf("%-30s %-10s %s\n", "NAME", "SIZE", "MODIFIED")
+	for _, m := range result.Models {
+		size := formatSize(m.Size)
+		modified := m.ModifiedAt
+		if t, err := time.Parse(time.RFC3339Nano, m.ModifiedAt); err == nil {
+			modified = t.Format("2006-01-02 15:04")
+		}
+		fmt.Printf("%-30s %-10s %s\n", m.Name, size, modified)
+	}
+	return nil
+}
+
 // checkOllama verifies that an Ollama instance is reachable.
 func checkOllama(ollamaURL string) error {
 	client := &http.Client{Timeout: 3 * time.Second}
@@ -467,9 +507,12 @@ func runChat(model, ollamaURL, query string, compact bool) error {
 		return err
 	}
 
+	// Track current snapshot for refresh diff
+	currentSnapshot := parseNetworkSnapshot(systemPrompt)
+
 	// REPL mode — use readline for terminal, fall back to basic scanner for pipes/tests
 	if !isTerminal(os.Stdin) {
-		return runChatBasicREPL(ollamaURL, model, compact, messages)
+		return runChatBasicREPL(ollamaURL, model, compact, messages, currentSnapshot)
 	}
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "you> ",
@@ -478,7 +521,7 @@ func runChat(model, ollamaURL, query string, compact bool) error {
 		EOFPrompt:       "exit",
 	})
 	if err != nil {
-		return runChatBasicREPL(ollamaURL, model, compact, messages)
+		return runChatBasicREPL(ollamaURL, model, compact, messages, currentSnapshot)
 	}
 	defer rl.Close()
 
@@ -501,11 +544,14 @@ func runChat(model, ollamaURL, query string, compact bool) error {
 		}
 		if input == "refresh" {
 			fmt.Fprint(os.Stderr, "Refreshing network data... ")
+			oldSnapshot := currentSnapshot
 			systemPrompt = gatherNetworkContext(compact)
+			currentSnapshot = parseNetworkSnapshot(systemPrompt)
 			messages = []ollamaMessage{
 				{Role: "system", Content: systemPrompt},
 			}
 			fmt.Fprintln(os.Stderr, "done.")
+			fmt.Print(diffNetworkSnapshots(oldSnapshot, currentSnapshot))
 			continue
 		}
 		if input == "save" || strings.HasPrefix(input, "save ") {
@@ -541,7 +587,7 @@ func runChat(model, ollamaURL, query string, compact bool) error {
 }
 
 // runChatBasicREPL is a fallback REPL when readline is unavailable (e.g., piped stdin in tests).
-func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMessage) error {
+func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMessage, currentSnapshot networkSnapshot) error {
 	fmt.Println("Network AI Chat (type 'exit' to quit, 'refresh' to reload, 'save' to export)")
 	fmt.Println()
 
@@ -562,11 +608,14 @@ func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMe
 		}
 		if input == "refresh" {
 			fmt.Fprint(os.Stderr, "Refreshing network data... ")
+			oldSnapshot := currentSnapshot
 			systemPrompt = gatherNetworkContext(compact)
+			currentSnapshot = parseNetworkSnapshot(systemPrompt)
 			messages = []ollamaMessage{
 				{Role: "system", Content: systemPrompt},
 			}
 			fmt.Fprintln(os.Stderr, "done.")
+			fmt.Print(diffNetworkSnapshots(oldSnapshot, currentSnapshot))
 			continue
 		}
 		if input == "save" || strings.HasPrefix(input, "save ") {
@@ -599,6 +648,103 @@ func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMe
 	}
 
 	return nil
+}
+
+// networkSnapshot holds a snapshot of connected devices for diffing on refresh.
+type networkSnapshot struct {
+	DeviceMACs map[string]string // MAC -> name
+	WAN_IP     string
+	DeviceCount int
+}
+
+// parseNetworkSnapshot extracts key data from a system prompt for diffing.
+func parseNetworkSnapshot(prompt string) networkSnapshot {
+	snap := networkSnapshot{DeviceMACs: make(map[string]string)}
+
+	lines := strings.Split(prompt, "\n")
+	inDevices := false
+	for _, line := range lines {
+		if strings.Contains(line, "=== CONNECTED DEVICES") {
+			inDevices = true
+			// Parse count from header like "=== CONNECTED DEVICES (14) ==="
+			if start := strings.Index(line, "("); start >= 0 {
+				if end := strings.Index(line[start:], ")"); end >= 0 {
+					fmt.Sscanf(line[start+1:start+end], "%d", &snap.DeviceCount)
+				}
+			}
+			continue
+		}
+		if inDevices && strings.HasPrefix(line, "===") {
+			inDevices = false
+		}
+		if inDevices && line != "" && !strings.HasPrefix(line, "NAME") {
+			fields := strings.Fields(line)
+			// Find the MAC field (XX-XX-XX-XX-XX-XX pattern)
+			for i, f := range fields {
+				if len(f) == 17 && strings.Count(f, "-") == 5 {
+					// Name is everything before the IP field (which is right before MAC)
+					nameEnd := i - 1 // skip the IP field
+					if nameEnd < 0 {
+						nameEnd = 0
+					}
+					name := strings.Join(fields[:nameEnd], " ")
+					snap.DeviceMACs[f] = name
+					break
+				}
+			}
+		}
+		if strings.Contains(line, "WAN IP:") {
+			parts := strings.Split(line, "|")
+			if len(parts) > 0 {
+				wan := strings.TrimPrefix(parts[0], "WAN IP: ")
+				snap.WAN_IP = strings.TrimSpace(wan)
+			}
+		}
+	}
+	return snap
+}
+
+// diffNetworkSnapshots compares two snapshots and returns a human-readable diff.
+func diffNetworkSnapshots(old, new networkSnapshot) string {
+	var sb strings.Builder
+
+	// Device count change
+	if old.DeviceCount != new.DeviceCount {
+		sb.WriteString(fmt.Sprintf("Devices: %d → %d\n", old.DeviceCount, new.DeviceCount))
+	} else if new.DeviceCount > 0 {
+		sb.WriteString(fmt.Sprintf("Devices: %d (no change)\n", new.DeviceCount))
+	}
+
+	// New devices
+	for mac, name := range new.DeviceMACs {
+		if _, existed := old.DeviceMACs[mac]; !existed {
+			if name == "" {
+				name = mac
+			}
+			sb.WriteString(fmt.Sprintf("  + %s (%s)\n", name, mac))
+		}
+	}
+
+	// Departed devices
+	for mac, name := range old.DeviceMACs {
+		if _, exists := new.DeviceMACs[mac]; !exists {
+			if name == "" {
+				name = mac
+			}
+			sb.WriteString(fmt.Sprintf("  - %s (%s)\n", name, mac))
+		}
+	}
+
+	// WAN IP change
+	if old.WAN_IP != "" && new.WAN_IP != "" && old.WAN_IP != new.WAN_IP {
+		sb.WriteString(fmt.Sprintf("WAN IP: %s → %s\n", old.WAN_IP, new.WAN_IP))
+	}
+
+	result := sb.String()
+	if result == "" {
+		return "No changes detected.\n"
+	}
+	return result
 }
 
 // saveConversation writes the conversation history to a markdown file.

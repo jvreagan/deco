@@ -361,6 +361,19 @@ Requires Ollama running locally (ollama serve). Set OLLAMA_HOST to override URL.
 			model, _ := cmd.Flags().GetString("model")
 			url, _ := cmd.Flags().GetString("ollama-url")
 			compact, _ := cmd.Flags().GetBool("compact")
+			listModels, _ := cmd.Flags().GetBool("list-models")
+
+			// Resolve OLLAMA_HOST early for --list-models
+			if url == "http://localhost:11434" {
+				if host := os.Getenv("OLLAMA_HOST"); host != "" {
+					url = host
+				}
+			}
+
+			if listModels {
+				return listOllamaModels(url)
+			}
+
 			query := ""
 			if len(args) > 0 {
 				query = args[0]
@@ -371,6 +384,7 @@ Requires Ollama running locally (ollama serve). Set OLLAMA_HOST to override URL.
 	cmd.Flags().String("model", "llama3.2", "Ollama model to use")
 	cmd.Flags().String("ollama-url", "http://localhost:11434", "Ollama API base URL")
 	cmd.Flags().Bool("compact", false, "Use smaller context window (fewer devices/snapshots)")
+	cmd.Flags().Bool("list-models", false, "List available Ollama models and exit")
 	return cmd
 }
 
