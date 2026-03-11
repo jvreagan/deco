@@ -1477,20 +1477,26 @@ func TestCompletionCmd(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
+	// Read pipe concurrently to avoid deadlock when output exceeds pipe buffer
+	var buf bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		buf.ReadFrom(r)
+		close(done)
+	}()
+
 	rootCmd.SetArgs([]string{"completion", "bash"})
 	err := rootCmd.Execute()
 
 	w.Close()
 	os.Stdout = old
+	<-done
 
 	if err != nil {
 		t.Fatalf("completion bash failed: %v", err)
 	}
 
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
 	output := buf.String()
-
 	if !strings.Contains(output, "bash") && !strings.Contains(output, "completion") {
 		t.Error("bash completion output should contain bash completion markers")
 	}
