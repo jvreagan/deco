@@ -591,7 +591,6 @@ func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMe
 	fmt.Println("Network AI Chat (type 'exit' to quit, 'refresh' to reload, 'save' to export)")
 	fmt.Println()
 
-	systemPrompt := messages[0].Content
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("you> ")
@@ -609,10 +608,10 @@ func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMe
 		if input == "refresh" {
 			fmt.Fprint(os.Stderr, "Refreshing network data... ")
 			oldSnapshot := currentSnapshot
-			systemPrompt = gatherNetworkContext(compact)
-			currentSnapshot = parseNetworkSnapshot(systemPrompt)
+			newPrompt := gatherNetworkContext(compact)
+			currentSnapshot = parseNetworkSnapshot(newPrompt)
 			messages = []ollamaMessage{
-				{Role: "system", Content: systemPrompt},
+				{Role: "system", Content: newPrompt},
 			}
 			fmt.Fprintln(os.Stderr, "done.")
 			fmt.Print(diffNetworkSnapshots(oldSnapshot, currentSnapshot))
