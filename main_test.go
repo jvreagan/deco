@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -924,10 +925,12 @@ func TestSelectivePurge(t *testing.T) {
 // ==================== CONFIG PATH TESTS ====================
 
 func TestConfigDir(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "/tmp/xdg-test")
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	got := configDir()
-	if got != "/tmp/xdg-test/deco" {
-		t.Errorf("configDir() = %q, want /tmp/xdg-test/deco", got)
+	want := filepath.Join(tmpDir, "deco")
+	if got != want {
+		t.Errorf("configDir() = %q, want %q", got, want)
 	}
 }
 
@@ -935,17 +938,19 @@ func TestConfigDirDefault(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	got := configDir()
 	home, _ := os.UserHomeDir()
-	want := home + "/.config/deco"
+	want := filepath.Join(home, ".config", "deco")
 	if got != want {
 		t.Errorf("configDir() = %q, want %q", got, want)
 	}
 }
 
 func TestCfgPath(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "/tmp/xdg-test")
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	got := cfgPath("foo.json")
-	if got != "/tmp/xdg-test/deco/foo.json" {
-		t.Errorf("cfgPath(\"foo.json\") = %q, want /tmp/xdg-test/deco/foo.json", got)
+	want := filepath.Join(tmpDir, "deco", "foo.json")
+	if got != want {
+		t.Errorf("cfgPath(\"foo.json\") = %q, want %q", got, want)
 	}
 }
 
