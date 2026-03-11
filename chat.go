@@ -8,9 +8,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/chzyer/readline"
 )
 
 type ollamaMessage struct {
@@ -29,6 +32,15 @@ type ollamaChatChunk struct {
 		Content string `json:"content"`
 	} `json:"message"`
 	Done bool `json:"done"`
+}
+
+// isTerminal reports whether f is connected to a terminal.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 // checkOllama verifies that an Ollama instance is reachable.
@@ -71,6 +83,7 @@ func gatherNetworkContext(compact bool) string {
 	var sb strings.Builder
 	sb.WriteString("You are a network assistant for a TP-Link Deco mesh router system.\n")
 	sb.WriteString("Answer questions about the network data below. Be concise.\n")
+	sb.WriteString("IMPORTANT: Only state facts present in the data below. Do not guess or invent device model names, MAC addresses, IP addresses, or any other details not explicitly shown.\n")
 
 	aliases := loadAliases()
 
@@ -454,19 +467,32 @@ func runChat(model, ollamaURL, query string, compact bool) error {
 		return err
 	}
 
-	// REPL mode
-	fmt.Println("Network AI Chat (type 'exit' to quit, 'refresh' to reload network data)")
+	// REPL mode — use readline for terminal, fall back to basic scanner for pipes/tests
+	if !isTerminal(os.Stdin) {
+		return runChatBasicREPL(ollamaURL, model, compact, messages)
+	}
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "you> ",
+		HistoryFile:     cfgPath("chat_history"),
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		return runChatBasicREPL(ollamaURL, model, compact, messages)
+	}
+	defer rl.Close()
+
+	fmt.Println("Network AI Chat (type 'exit' to quit, 'refresh' to reload, 'save' to export)")
 	fmt.Println()
 
-	scanner := bufio.NewScanner(os.Stdin)
 	for {
-		fmt.Print("you> ")
-		if !scanner.Scan() {
-			// EOF (Ctrl+D)
+		input, err := rl.Readline()
+		if err != nil {
+			// EOF (Ctrl+D) or Ctrl+C
 			fmt.Println()
 			break
 		}
-		input := strings.TrimSpace(scanner.Text())
+		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
@@ -480,6 +506,16 @@ func runChat(model, ollamaURL, query string, compact bool) error {
 				{Role: "system", Content: systemPrompt},
 			}
 			fmt.Fprintln(os.Stderr, "done.")
+			continue
+		}
+		if input == "save" || strings.HasPrefix(input, "save ") {
+			path := strings.TrimPrefix(input, "save ")
+			if path == "save" {
+				path = ""
+			}
+			if err := saveConversation(messages, path); err != nil {
+				fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
+			}
 			continue
 		}
 
@@ -501,5 +537,101 @@ func runChat(model, ollamaURL, query string, compact bool) error {
 		messages = append(messages, ollamaMessage{Role: "assistant", Content: response})
 	}
 
+	return nil
+}
+
+// runChatBasicREPL is a fallback REPL when readline is unavailable (e.g., piped stdin in tests).
+func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMessage) error {
+	fmt.Println("Network AI Chat (type 'exit' to quit, 'refresh' to reload, 'save' to export)")
+	fmt.Println()
+
+	systemPrompt := messages[0].Content
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		fmt.Print("you> ")
+		if !scanner.Scan() {
+			fmt.Println()
+			break
+		}
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			continue
+		}
+		if input == "exit" || input == "quit" {
+			break
+		}
+		if input == "refresh" {
+			fmt.Fprint(os.Stderr, "Refreshing network data... ")
+			systemPrompt = gatherNetworkContext(compact)
+			messages = []ollamaMessage{
+				{Role: "system", Content: systemPrompt},
+			}
+			fmt.Fprintln(os.Stderr, "done.")
+			continue
+		}
+		if input == "save" || strings.HasPrefix(input, "save ") {
+			path := strings.TrimPrefix(input, "save ")
+			if path == "save" {
+				path = ""
+			}
+			if err := saveConversation(messages, path); err != nil {
+				fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
+			}
+			continue
+		}
+
+		messages = append(messages, ollamaMessage{Role: "user", Content: input})
+		req := ollamaChatRequest{
+			Model:    model,
+			Messages: messages,
+			Stream:   true,
+		}
+
+		fmt.Print("\nassistant> ")
+		response, err := streamOllamaChat(ollamaURL, req, os.Stdout)
+		fmt.Print("\n\n")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			continue
+		}
+
+		messages = append(messages, ollamaMessage{Role: "assistant", Content: response})
+	}
+
+	return nil
+}
+
+// saveConversation writes the conversation history to a markdown file.
+func saveConversation(messages []ollamaMessage, path string) error {
+	if path == "" {
+		path = fmt.Sprintf("deco-chat-%s.md", time.Now().Format("2006-01-02-150405"))
+	}
+
+	// Resolve relative to home directory if not absolute
+	if !filepath.IsAbs(path) {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(home, path)
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("# Deco Chat — %s\n\n", time.Now().Format("2006-01-02 15:04:05")))
+
+	for _, m := range messages {
+		switch m.Role {
+		case "system":
+			// Skip system prompt in export
+			continue
+		case "user":
+			sb.WriteString(fmt.Sprintf("**You:** %s\n\n", m.Content))
+		case "assistant":
+			sb.WriteString(fmt.Sprintf("**Assistant:** %s\n\n", m.Content))
+		}
+	}
+
+	if err := os.WriteFile(path, []byte(sb.String()), 0644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Conversation saved to %s\n", path)
 	return nil
 }

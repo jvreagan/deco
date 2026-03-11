@@ -44,6 +44,8 @@ deco clients
 | `poll` | Live bandwidth monitoring per device |
 | `monitor` | Full network monitoring — logs all data to SQLite |
 | `report [period]` | Show bandwidth usage report (`today`, `hour`, or `all`) |
+| `report network [period]` | WAN IP history and CPU/memory trends |
+| `report mesh [period]` | Mesh node uptime history |
 | `status` | Show database statistics (size, record counts, date range) |
 | `purge` | Delete database records (all, or by `--days`/`--before`) |
 | `chat [question]` | Ask questions about your network using a local Ollama LLM |
@@ -95,6 +97,8 @@ deco poll --interval 10      # Bandwidth every 10s
 deco monitor --interval 30   # Full monitoring every 30s
 deco report today            # Today's bandwidth by device
 deco report hour --json      # Last hour as JSON
+deco report network          # WAN IP changes and CPU/memory trends
+deco report mesh             # Mesh node uptime history
 deco reboot --force          # Reboot without confirmation
 deco block AA-BB-CC-DD-EE-FF # Block a device
 deco purge --days 30           # Delete records older than 30 days

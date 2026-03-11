@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -714,6 +715,207 @@ func TestChatCmdAcceptsOptionalArg(t *testing.T) {
 	// Two args should fail
 	if err := cmd.Args(cmd, []string{"a", "b"}); err == nil {
 		t.Error("expected two args to be rejected")
+	}
+}
+
+// ==================== SAVE CONVERSATION TESTS ====================
+
+func TestSaveConversation(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := fmt.Sprintf("%s/test-chat.md", tmpDir)
+
+	messages := []ollamaMessage{
+		{Role: "system", Content: "system prompt"},
+		{Role: "user", Content: "how many devices?"},
+		{Role: "assistant", Content: "There are 5 devices."},
+		{Role: "user", Content: "which one uses the most?"},
+		{Role: "assistant", Content: "Jamess-MBP uses the most bandwidth."},
+	}
+
+	err := saveConversation(messages, path)
+	if err != nil {
+		t.Fatalf("saveConversation failed: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read saved file: %v", err)
+	}
+	content := string(data)
+
+	// Should have header
+	if !strings.Contains(content, "# Deco Chat") {
+		t.Error("expected '# Deco Chat' header")
+	}
+	// Should skip system prompt
+	if strings.Contains(content, "system prompt") {
+		t.Error("system prompt should not appear in export")
+	}
+	// Should have user and assistant messages
+	if !strings.Contains(content, "**You:** how many devices?") {
+		t.Error("expected user message in export")
+	}
+	if !strings.Contains(content, "**Assistant:** There are 5 devices.") {
+		t.Error("expected assistant message in export")
+	}
+	// Should have both turns
+	if !strings.Contains(content, "Jamess-MBP") {
+		t.Error("expected second turn in export")
+	}
+}
+
+func TestSaveConversationDefaultFilename(t *testing.T) {
+	// Save with empty path should generate a timestamped filename in home dir
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home dir")
+	}
+
+	messages := []ollamaMessage{
+		{Role: "user", Content: "test"},
+	}
+
+	err = saveConversation(messages, "")
+	if err != nil {
+		t.Fatalf("saveConversation with default path failed: %v", err)
+	}
+
+	// Find and clean up the generated file
+	pattern := fmt.Sprintf("deco-chat-%s-*.md", time.Now().Format("2006-01-02"))
+	matches, _ := filepath.Glob(filepath.Join(home, pattern))
+	for _, m := range matches {
+		os.Remove(m)
+	}
+}
+
+func TestSaveConversationEmptyMessages(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := fmt.Sprintf("%s/empty-chat.md", tmpDir)
+
+	// Only system message — export should be just the header
+	messages := []ollamaMessage{
+		{Role: "system", Content: "prompt"},
+	}
+
+	err := saveConversation(messages, path)
+	if err != nil {
+		t.Fatalf("saveConversation failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(path)
+	content := string(data)
+	if !strings.Contains(content, "# Deco Chat") {
+		t.Error("expected header even with no conversation")
+	}
+	if strings.Contains(content, "**You:**") {
+		t.Error("expected no user messages")
+	}
+}
+
+// ==================== ANTI-HALLUCINATION PROMPT TEST ====================
+
+func TestGatherNetworkContextAntiHallucination(t *testing.T) {
+	testEnv(t)
+	ctx := gatherNetworkContext(false)
+
+	if !strings.Contains(ctx, "Only state facts") {
+		t.Error("expected anti-hallucination instruction in context")
+	}
+	if !strings.Contains(ctx, "Do not guess") {
+		t.Error("expected 'Do not guess' instruction in context")
+	}
+}
+
+// ==================== REPL MODE TESTS ====================
+
+func TestRunChatREPLExit(t *testing.T) {
+	testEnv(t)
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"models":[]}`)
+			return
+		}
+	}))
+	defer mockServer.Close()
+
+	// Pipe "exit" to stdin
+	oldStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	w.WriteString("exit\n")
+	w.Close()
+	os.Stdin = r
+
+	oldStdout := os.Stdout
+	_, wOut, _ := os.Pipe()
+	os.Stdout = wOut
+
+	err := runChat("llama3.2", mockServer.URL, "", false)
+
+	wOut.Close()
+	os.Stdin = oldStdin
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("REPL exit should not error: %v", err)
+	}
+}
+
+func TestRunChatREPLSave(t *testing.T) {
+	testEnv(t)
+	tmpDir := t.TempDir()
+	savePath := filepath.Join(tmpDir, "test-save.md")
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"models":[]}`)
+			return
+		}
+		if r.URL.Path == "/api/chat" {
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			chunk := ollamaChatChunk{Done: true}
+			chunk.Message.Content = "test response"
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "%s\n", data)
+			return
+		}
+	}))
+	defer mockServer.Close()
+
+	// Pipe commands: ask a question, save, exit
+	oldStdin := os.Stdin
+	r, w, _ := os.Pipe()
+	w.WriteString("hello\nsave " + savePath + "\nexit\n")
+	w.Close()
+	os.Stdin = r
+
+	oldStdout := os.Stdout
+	_, wOut, _ := os.Pipe()
+	os.Stdout = wOut
+
+	err := runChat("llama3.2", mockServer.URL, "", false)
+
+	wOut.Close()
+	os.Stdin = oldStdin
+	os.Stdout = oldStdout
+
+	if err != nil {
+		t.Fatalf("REPL with save should not error: %v", err)
+	}
+
+	// Verify the file was saved
+	data, err := os.ReadFile(savePath)
+	if err != nil {
+		t.Fatalf("saved file should exist: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "**You:** hello") {
+		t.Error("saved file should contain user message")
+	}
+	if !strings.Contains(content, "**Assistant:** test response") {
+		t.Error("saved file should contain assistant response")
 	}
 }
 
