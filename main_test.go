@@ -814,6 +814,7 @@ func TestLoadConfigMissing(t *testing.T) {
 	// Override os.Executable to point somewhere without a config
 	origDir, _ := os.Getwd()
 	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	os.Chdir(tmpDir)
 	defer os.Chdir(origDir)
 
@@ -1662,7 +1663,7 @@ func TestRunReportEndToEnd(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := runReport("today", false, "", "")
+	err := runReport("today", false, false, "", "", "")
 
 	w.Close()
 	os.Stdout = old
@@ -1698,7 +1699,7 @@ func TestRunReportJSON(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := runReport("today", true, "", "")
+	err := runReport("today", true, false, "", "", "")
 
 	w.Close()
 	os.Stdout = old
@@ -1732,7 +1733,7 @@ func TestRunReportWithNameFilter(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := runReport("today", false, "phone", "")
+	err := runReport("today", false, false, "phone", "", "")
 
 	w.Close()
 	os.Stdout = old
@@ -1760,7 +1761,7 @@ func TestRunReportEmpty(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := runReport("today", false, "", "")
+	err := runReport("today", false, false, "", "", "")
 
 	w.Close()
 	os.Stdout = old
@@ -2489,7 +2490,7 @@ func TestRunMonitorNoConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	if err := runMonitor(60, false); err == nil {
+	if err := runMonitor(60, false, 0); err == nil {
 		t.Error("runMonitor should return error without config")
 	}
 }
@@ -2584,5 +2585,360 @@ func TestPrintNetworkReportWithIPChanges(t *testing.T) {
 	// avg CPU = (10+30+20)/3 = 20
 	if !strings.Contains(output, "20.0%") {
 		t.Error("should contain avg CPU 20.0%")
+	}
+}
+
+// ==================== CSV EXPORT TESTS ====================
+
+func TestPrintReportCSV(t *testing.T) {
+	testEnv(t)
+
+	report := &Report{
+		Period:          "Today",
+		StartTime:       "2026-03-11T00:00:00Z",
+		QueryTime:       "2026-03-11T12:00:00Z",
+		IntervalSeconds: 60,
+		TotalSamples:    100,
+		Devices: []ReportDevice{
+			{
+				MAC:           "AA-BB-CC-DD-EE-FF",
+				Name:          "TestDevice",
+				IP:            "192.168.68.100",
+				Connection:    "WiFi 5GHz",
+				SampleCount:   50,
+				TotalDownload: 1000,
+				TotalUpload:   200,
+			},
+			{
+				MAC:           "11-22-33-44-55-66",
+				Name:          "Zero,Device",
+				IP:            "192.168.68.101",
+				Connection:    "Wired",
+				SampleCount:   50,
+				TotalDownload: 500,
+				TotalUpload:   100,
+			},
+		},
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	printReportCSV(report)
+
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	// Check header
+	if !strings.HasPrefix(output, "mac,name,ip,connection,samples,download_kb,upload_kb,total_kb\n") {
+		t.Errorf("expected CSV header, got: %s", output[:80])
+	}
+	// Check data row
+	if !strings.Contains(output, "AA-BB-CC-DD-EE-FF,TestDevice,192.168.68.100") {
+		t.Error("expected device row in CSV")
+	}
+	// Check comma-in-name is quoted
+	if !strings.Contains(output, "\"Zero,Device\"") {
+		t.Error("expected quoted name for comma-containing device name")
+	}
+	// Verify total calculation: 1000 * 60 = 60000 download, 200 * 60 = 12000 upload, total = 72000
+	if !strings.Contains(output, "60000,12000,72000") {
+		t.Error("expected correct KB totals in CSV")
+	}
+}
+
+func TestRunReportCSV(t *testing.T) {
+	testEnv(t)
+
+	db, err := initDB()
+	if err != nil {
+		t.Fatalf("initDB failed: %v", err)
+	}
+	defer db.Close()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	_, err = db.Exec(`INSERT INTO bandwidth_samples
+		(timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		ts, "AA-BB-CC-DD-EE-FF", "TestDev", "192.168.68.100", "WiFi 5GHz", "phone", 100, 50)
+	if err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err = runReport("today", false, true, "", "", "")
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReport CSV failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.HasPrefix(output, "mac,name,") {
+		t.Error("expected CSV header")
+	}
+	if !strings.Contains(output, "AA-BB-CC-DD-EE-FF") {
+		t.Error("expected device MAC in CSV output")
+	}
+}
+
+// ==================== TAG TESTS ====================
+
+func TestLoadSaveTags(t *testing.T) {
+	testEnv(t)
+
+	tags := loadTags()
+	if len(tags) != 0 {
+		t.Error("expected empty tags initially")
+	}
+
+	tags["AA-BB-CC-DD-EE-FF"] = []string{"gaming", "kids"}
+	tags["11-22-33-44-55-66"] = []string{"iot"}
+	saveTags(tags)
+
+	loaded := loadTags()
+	if len(loaded) != 2 {
+		t.Fatalf("expected 2 tagged devices, got %d", len(loaded))
+	}
+	if len(loaded["AA-BB-CC-DD-EE-FF"]) != 2 {
+		t.Errorf("expected 2 tags for AA-BB, got %d", len(loaded["AA-BB-CC-DD-EE-FF"]))
+	}
+	if loaded["11-22-33-44-55-66"][0] != "iot" {
+		t.Errorf("expected 'iot' tag, got %q", loaded["11-22-33-44-55-66"][0])
+	}
+}
+
+func TestSaveTagsCleanup(t *testing.T) {
+	testEnv(t)
+
+	tags := map[string][]string{
+		"AA-BB-CC-DD-EE-FF": {"gaming"},
+		"11-22-33-44-55-66": {}, // empty should be cleaned up
+	}
+	saveTags(tags)
+
+	loaded := loadTags()
+	if len(loaded) != 1 {
+		t.Errorf("expected 1 tagged device after cleanup, got %d", len(loaded))
+	}
+}
+
+func TestRunAliasTag(t *testing.T) {
+	testEnv(t)
+
+	err := runAliasTag([]string{"AA-BB-CC-DD-EE-FF", "gaming"})
+	if err != nil {
+		t.Fatalf("runAliasTag failed: %v", err)
+	}
+
+	tags := loadTags()
+	if len(tags["AA-BB-CC-DD-EE-FF"]) != 1 || tags["AA-BB-CC-DD-EE-FF"][0] != "gaming" {
+		t.Errorf("expected tag 'gaming', got %v", tags["AA-BB-CC-DD-EE-FF"])
+	}
+
+	// Duplicate tag should be idempotent
+	err = runAliasTag([]string{"AA-BB-CC-DD-EE-FF", "gaming"})
+	if err != nil {
+		t.Fatalf("duplicate tag failed: %v", err)
+	}
+	tags = loadTags()
+	if len(tags["AA-BB-CC-DD-EE-FF"]) != 1 {
+		t.Error("duplicate tag should not add second entry")
+	}
+}
+
+func TestRunAliasTagInvalidMAC(t *testing.T) {
+	err := runAliasTag([]string{"invalid", "gaming"})
+	if err == nil {
+		t.Error("expected error for invalid MAC")
+	}
+}
+
+func TestRunAliasUntag(t *testing.T) {
+	testEnv(t)
+
+	// Set up a tag first
+	tags := map[string][]string{
+		"AA-BB-CC-DD-EE-FF": {"gaming", "kids"},
+	}
+	saveTags(tags)
+
+	err := runAliasUntag([]string{"AA-BB-CC-DD-EE-FF", "gaming"})
+	if err != nil {
+		t.Fatalf("runAliasUntag failed: %v", err)
+	}
+
+	loaded := loadTags()
+	if len(loaded["AA-BB-CC-DD-EE-FF"]) != 1 || loaded["AA-BB-CC-DD-EE-FF"][0] != "kids" {
+		t.Errorf("expected only 'kids' tag remaining, got %v", loaded["AA-BB-CC-DD-EE-FF"])
+	}
+}
+
+func TestRunAliasUntagNotFound(t *testing.T) {
+	testEnv(t)
+
+	err := runAliasUntag([]string{"AA-BB-CC-DD-EE-FF", "nonexistent"})
+	if err == nil {
+		t.Error("expected error for non-existent tag")
+	}
+}
+
+func TestRunAliasTags(t *testing.T) {
+	testEnv(t)
+
+	// Set up some tags and aliases
+	aliases := map[string]string{"AA-BB-CC-DD-EE-FF": "Xbox"}
+	saveAliases(aliases)
+	tags := map[string][]string{
+		"AA-BB-CC-DD-EE-FF": {"gaming"},
+		"11-22-33-44-55-66": {"iot"},
+	}
+	saveTags(tags)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runAliasTags()
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runAliasTags failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "[gaming]") {
+		t.Error("expected [gaming] group header")
+	}
+	if !strings.Contains(output, "Xbox") {
+		t.Error("expected alias name 'Xbox' in tags output")
+	}
+	if !strings.Contains(output, "[iot]") {
+		t.Error("expected [iot] group header")
+	}
+}
+
+func TestRunReportWithGroup(t *testing.T) {
+	testEnv(t)
+
+	db, err := initDB()
+	if err != nil {
+		t.Fatalf("initDB failed: %v", err)
+	}
+	defer db.Close()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	_, _ = db.Exec(`INSERT INTO bandwidth_samples
+		(timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		ts, "AA-BB-CC-DD-EE-FF", "Xbox", "192.168.68.71", "WiFi 5GHz", "console", 5000, 1000)
+	_, _ = db.Exec(`INSERT INTO bandwidth_samples
+		(timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		ts, "11-22-33-44-55-66", "Roomba", "192.168.68.80", "WiFi 2.4GHz", "iot", 10, 5)
+
+	// Tag Xbox as "gaming"
+	tagMap := map[string][]string{"AA-BB-CC-DD-EE-FF": {"gaming"}}
+	saveTags(tagMap)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err = runReport("today", false, false, "", "", "gaming")
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReport with group failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "Xbox") {
+		t.Error("expected Xbox in group-filtered report")
+	}
+	if strings.Contains(output, "Roomba") {
+		t.Error("Roomba should be excluded by group filter")
+	}
+}
+
+// ==================== NEW FLAG TESTS ====================
+
+func TestChatCmdShowContextFlag(t *testing.T) {
+	cmd := chatCmd()
+	sc, err := cmd.Flags().GetBool("show-context")
+	if err != nil {
+		t.Fatalf("show-context flag error: %v", err)
+	}
+	if sc != false {
+		t.Error("expected default show-context=false")
+	}
+}
+
+func TestMonitorCmdAlertFlag(t *testing.T) {
+	cmd := monitorCmd()
+	alert, err := cmd.Flags().GetInt("alert")
+	if err != nil {
+		t.Fatalf("alert flag error: %v", err)
+	}
+	if alert != 0 {
+		t.Error("expected default alert=0")
+	}
+}
+
+func TestReportCmdCSVFlag(t *testing.T) {
+	cmd := reportCmd()
+	csv, err := cmd.Flags().GetBool("csv")
+	if err != nil {
+		t.Fatalf("csv flag error: %v", err)
+	}
+	if csv != false {
+		t.Error("expected default csv=false")
+	}
+}
+
+func TestReportCmdGroupFlag(t *testing.T) {
+	cmd := reportCmd()
+	group, err := cmd.Flags().GetString("group")
+	if err != nil {
+		t.Fatalf("group flag error: %v", err)
+	}
+	if group != "" {
+		t.Error("expected default group=empty")
+	}
+}
+
+func TestAliasTagSubcommands(t *testing.T) {
+	cmd := aliasCmd()
+	found := map[string]bool{}
+	for _, sub := range cmd.Commands() {
+		found[sub.Name()] = true
+	}
+	for _, name := range []string{"tag", "untag", "tags"} {
+		if !found[name] {
+			t.Errorf("expected subcommand %q on alias cmd", name)
+		}
 	}
 }

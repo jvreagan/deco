@@ -83,6 +83,46 @@ func listOllamaModels(ollamaURL string) error {
 	return nil
 }
 
+// resolveModel checks if the requested model is available on Ollama.
+// If not found, it auto-selects the first available model and prints a notice.
+func resolveModel(ollamaURL, model string) (string, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(ollamaURL + "/api/tags")
+	if err != nil {
+		return model, nil // can't check, proceed with requested model
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Models []ollamaModelInfo `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return model, nil
+	}
+
+	if len(result.Models) == 0 {
+		return "", fmt.Errorf("no models installed. Pull one with: ollama pull %s", model)
+	}
+
+	// Check if requested model is available (exact or prefix match)
+	for _, m := range result.Models {
+		if m.Name == model || strings.HasPrefix(m.Name, model+":") {
+			return model, nil
+		}
+	}
+
+	// Model not found — auto-select first available
+	selected := result.Models[0].Name
+	names := make([]string, len(result.Models))
+	for i, m := range result.Models {
+		names[i] = m.Name
+	}
+	fmt.Fprintf(os.Stderr, "Model %q not found. Using %q instead.\n", model, selected)
+	fmt.Fprintf(os.Stderr, "Available: %s\n", strings.Join(names, ", "))
+	fmt.Fprintf(os.Stderr, "Use --list-models to see all, or --model <name> to specify.\n")
+	return selected, nil
+}
+
 // checkOllama verifies that an Ollama instance is reachable.
 func checkOllama(ollamaURL string) error {
 	client := &http.Client{Timeout: 3 * time.Second}
@@ -474,7 +514,7 @@ func streamOllamaChat(ollamaURL string, req ollamaChatRequest, w io.Writer) (str
 }
 
 // runChat is the main entry point for the chat command.
-func runChat(model, ollamaURL, query string, compact bool) error {
+func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 	// Resolve OLLAMA_HOST env var as fallback
 	if ollamaURL == "http://localhost:11434" {
 		if host := os.Getenv("OLLAMA_HOST"); host != "" {
@@ -486,9 +526,21 @@ func runChat(model, ollamaURL, query string, compact bool) error {
 		return err
 	}
 
+	// Auto-detect model
+	resolved, err := resolveModel(ollamaURL, model)
+	if err != nil {
+		return err
+	}
+	model = resolved
+
 	fmt.Fprint(os.Stderr, "Gathering network data... ")
 	systemPrompt := gatherNetworkContext(compact)
 	fmt.Fprintln(os.Stderr, "done.")
+
+	if showContext {
+		fmt.Fprintln(os.Stderr, systemPrompt)
+		return nil
+	}
 
 	messages := []ollamaMessage{
 		{Role: "system", Content: systemPrompt},

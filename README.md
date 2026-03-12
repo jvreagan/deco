@@ -68,12 +68,16 @@ deco clients
 | `--mac`, `-m <MAC>` | Filter by MAC address — exact match, case-insensitive (`clients`, `report`) |
 | `--watch`, `-w` | Auto-refresh client list (use with `clients`) |
 | `--notify` | Alert on new MAC addresses (use with `monitor`) |
+| `--alert N` | Alert when any device exceeds N KB/s (use with `monitor`) |
 | `--days N` | Purge records older than N days (use with `purge`) |
 | `--before YYYY-MM-DD` | Purge records before date (use with `purge`) |
 | `--model <name>` | Ollama model to use (default: `llama3.2`, use with `chat`) |
 | `--ollama-url <url>` | Ollama API base URL (use with `chat`) |
 | `--compact` | Use smaller context window for chat (use with `chat`) |
 | `--list-models` | List available Ollama models and exit (use with `chat`) |
+| `--show-context` | Print system prompt to stderr and exit (use with `chat`) |
+| `--csv` | Output as CSV (use with `report`) |
+| `--group`, `-g <tag>` | Filter by device tag (use with `report`) |
 
 ### Device Aliases
 
@@ -87,6 +91,20 @@ deco alias --remove AA-BB-CC-DD-EE-FF   # Remove an alias
 
 Aliases are stored in `~/.config/deco/deco_aliases.json` and are applied in `clients`, `report`, and `chat` output.
 
+### Device Tags
+
+Group devices with tags for filtered reporting:
+
+```bash
+deco alias tag AA-BB-CC-DD-EE-FF gaming    # Tag a device
+deco alias tag AA-BB-CC-DD-EE-FF kids      # Multiple tags per device
+deco alias untag AA-BB-CC-DD-EE-FF gaming  # Remove a tag
+deco alias tags                             # List all tags and devices
+deco report --group gaming                  # Report filtered by tag
+```
+
+Tags are stored in `~/.config/deco/deco_tags.json`.
+
 ### Examples
 
 ```bash
@@ -96,8 +114,11 @@ deco clients --mac AA-BB-CC-DD-EE-FF  # Filter by MAC
 deco clients --watch         # Auto-refresh every 5s
 deco poll --interval 10      # Bandwidth every 10s
 deco monitor --interval 30   # Full monitoring every 30s
+deco monitor --alert 5000    # Alert when any device exceeds 5000KB/s
 deco report today            # Today's bandwidth by device
 deco report hour --json      # Last hour as JSON
+deco report today --csv      # CSV export for spreadsheets
+deco report --group gaming   # Report for tagged devices only
 deco report network          # WAN IP changes and CPU/memory trends
 deco report mesh             # Mesh node uptime history
 deco reboot --force          # Reboot without confirmation
@@ -107,6 +128,7 @@ deco purge --before 2025-01-01 # Delete records before a date
 deco chat "how many devices?"  # Single AI question
 deco chat                      # Interactive AI chat session
 deco chat --compact "status?"  # Use smaller context for small models
+deco chat --show-context       # Debug: print what the AI sees
 deco api 'admin/client?form=client_list' '{"operation":"read"}'
 ```
 

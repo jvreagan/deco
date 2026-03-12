@@ -34,7 +34,7 @@ func TestCheckOllamaRunning(t *testing.T) {
 			t.Errorf("expected /api/tags, got %s", r.URL.Path)
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"models":[]}`)
+		fmt.Fprint(w, `{"models":[{"name":"llama3.2:latest","size":2000000000}]}`)
 	}))
 	defer ts.Close()
 
@@ -490,7 +490,7 @@ func TestGatherNetworkContextCompactMode(t *testing.T) {
 // ==================== RUNCHAT TESTS ====================
 
 func TestRunChatOllamaDown(t *testing.T) {
-	err := runChat("llama3.2", "http://127.0.0.1:1", "test question", false)
+	err := runChat("llama3.2", "http://127.0.0.1:1", "test question", false, false)
 	if err == nil {
 		t.Fatal("expected error when Ollama is down")
 	}
@@ -505,7 +505,7 @@ func TestRunChatSingleShot(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, `{"models":[]}`)
+			fmt.Fprint(w, `{"models":[{"name":"llama3.2:latest","size":2000000000}]}`)
 			return
 		}
 		if r.URL.Path == "/api/chat" {
@@ -547,7 +547,7 @@ func TestRunChatSingleShot(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := runChat("llama3.2", ts.URL, "how many devices?", false)
+	err := runChat("llama3.2", ts.URL, "how many devices?", false, false)
 
 	w.Close()
 	os.Stdout = old
@@ -571,7 +571,7 @@ func TestRunChatOllamaHostEnvVar(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, `{"models":[]}`)
+			fmt.Fprint(w, `{"models":[{"name":"llama3.2:latest","size":2000000000}]}`)
 			return
 		}
 		if r.URL.Path == "/api/chat" {
@@ -592,7 +592,7 @@ func TestRunChatOllamaHostEnvVar(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	err := runChat("llama3.2", "http://localhost:11434", "test", false)
+	err := runChat("llama3.2", "http://localhost:11434", "test", false, false)
 
 	w.Close()
 	os.Stdout = old
@@ -627,7 +627,7 @@ func TestRunChatSystemPromptContainsContext(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, `{"models":[]}`)
+			fmt.Fprint(w, `{"models":[{"name":"llama3.2:latest","size":2000000000}]}`)
 			return
 		}
 		if r.URL.Path == "/api/chat" {
@@ -652,7 +652,7 @@ func TestRunChatSystemPromptContainsContext(t *testing.T) {
 	_, w, _ := os.Pipe()
 	os.Stdout = w
 
-	runChat("llama3.2", mockServer.URL, "test", false)
+	runChat("llama3.2", mockServer.URL, "test", false, false)
 
 	w.Close()
 	os.Stdout = old
@@ -834,7 +834,7 @@ func TestRunChatREPLExit(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, `{"models":[]}`)
+			fmt.Fprint(w, `{"models":[{"name":"llama3.2:latest","size":2000000000}]}`)
 			return
 		}
 	}))
@@ -851,7 +851,7 @@ func TestRunChatREPLExit(t *testing.T) {
 	_, wOut, _ := os.Pipe()
 	os.Stdout = wOut
 
-	err := runChat("llama3.2", mockServer.URL, "", false)
+	err := runChat("llama3.2", mockServer.URL, "", false, false)
 
 	wOut.Close()
 	os.Stdin = oldStdin
@@ -870,7 +870,7 @@ func TestRunChatREPLSave(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/tags" {
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, `{"models":[]}`)
+			fmt.Fprint(w, `{"models":[{"name":"llama3.2:latest","size":2000000000}]}`)
 			return
 		}
 		if r.URL.Path == "/api/chat" {
@@ -895,7 +895,7 @@ func TestRunChatREPLSave(t *testing.T) {
 	_, wOut, _ := os.Pipe()
 	os.Stdout = wOut
 
-	err := runChat("llama3.2", mockServer.URL, "", false)
+	err := runChat("llama3.2", mockServer.URL, "", false, false)
 
 	wOut.Close()
 	os.Stdin = oldStdin
@@ -1127,6 +1127,112 @@ func TestDiffNetworkSnapshotsNoChange(t *testing.T) {
 
 	if !strings.Contains(diff, "no change") {
 		t.Errorf("expected 'no change', got: %s", diff)
+	}
+}
+
+// ==================== RESOLVE MODEL TESTS ====================
+
+func TestResolveModelFound(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"models": []map[string]interface{}{
+				{"name": "llama3.2:latest", "size": 2000000000},
+				{"name": "mistral:latest", "size": 4000000000},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	model, err := resolveModel(ts.URL, "llama3.2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if model != "llama3.2" {
+		t.Errorf("expected llama3.2, got %s", model)
+	}
+}
+
+func TestResolveModelNotFound(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"models": []map[string]interface{}{
+				{"name": "mistral:latest", "size": 4000000000},
+			},
+		})
+	}))
+	defer ts.Close()
+
+	model, err := resolveModel(ts.URL, "llama3.2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if model != "mistral:latest" {
+		t.Errorf("expected mistral:latest (auto-selected), got %s", model)
+	}
+}
+
+func TestResolveModelNoModels(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"models": []map[string]interface{}{},
+		})
+	}))
+	defer ts.Close()
+
+	_, err := resolveModel(ts.URL, "llama3.2")
+	if err == nil {
+		t.Fatal("expected error for no models")
+	}
+	if !strings.Contains(err.Error(), "no models installed") {
+		t.Errorf("expected 'no models installed', got: %v", err)
+	}
+}
+
+func TestResolveModelUnreachable(t *testing.T) {
+	// When Ollama is unreachable, should return the model unchanged (optimistic)
+	model, err := resolveModel("http://127.0.0.1:1", "llama3.2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if model != "llama3.2" {
+		t.Errorf("expected llama3.2 (unchanged), got %s", model)
+	}
+}
+
+// ==================== SHOW CONTEXT TESTS ====================
+
+func TestRunChatShowContext(t *testing.T) {
+	testEnv(t)
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			fmt.Fprint(w, `{"models":[{"name":"llama3.2:latest","size":2000000000}]}`)
+			return
+		}
+		t.Errorf("should not call /api/chat when show-context is true")
+	}))
+	defer ts.Close()
+
+	// Capture stderr (show-context prints there)
+	oldStderr := os.Stderr
+	rErr, wErr, _ := os.Pipe()
+	os.Stderr = wErr
+
+	err := runChat("llama3.2", ts.URL, "test", false, true)
+
+	wErr.Close()
+	os.Stderr = oldStderr
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(rErr)
+	output := buf.String()
+
+	if !strings.Contains(output, "network assistant") {
+		t.Error("expected system prompt in stderr output")
 	}
 }
 

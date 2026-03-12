@@ -440,8 +440,9 @@ func runPoll(interval int) error {
 	})
 }
 
-func runMonitor(interval int, notify bool) error {
+func runMonitor(interval int, notify bool, alertThreshold int) error {
 	var knownMACs map[string]bool
+	var aliases map[string]string
 
 	return pollLoop(pollLoopConfig{
 		interval: interval,
@@ -454,6 +455,10 @@ func runMonitor(interval int, notify bool) error {
 			if notify {
 				knownMACs = loadKnownMACs(db)
 				fmt.Printf("Known MACs: %d (notifications enabled)\n", len(knownMACs))
+			}
+			if alertThreshold > 0 {
+				aliases = loadAliases()
+				fmt.Printf("Bandwidth alert threshold: %dKB/s\n", alertThreshold)
 			}
 			fmt.Println("Press Ctrl+C to stop")
 		},
@@ -485,6 +490,17 @@ func runMonitor(interval int, notify bool) error {
 						if !knownMACs[macUpper] {
 							notifyNewMAC(c.MAC, c.Name, c.IP)
 							knownMACs[macUpper] = true
+						}
+					}
+					if alertThreshold > 0 {
+						rate := c.DownloadKbps + c.UploadKbps
+						if rate > alertThreshold {
+							name := c.Name
+							if alias, ok := aliases[strings.ToUpper(c.MAC)]; ok {
+								name = alias
+							}
+							fmt.Printf("[%s] ALERT: %s — %dKB/s (threshold: %dKB/s)\n",
+								ts, name, rate, alertThreshold)
 						}
 					}
 				}
@@ -640,7 +656,7 @@ func estimateInterval(db *sql.DB, since time.Time) int {
 	return gaps[len(gaps)/2] // median
 }
 
-func runReport(period string, jsonOut bool, nameFilter, macFilter string) error {
+func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group string) error {
 	db, err := initDB()
 	if err != nil {
 		return err
@@ -746,6 +762,20 @@ func runReport(period string, jsonOut bool, nameFilter, macFilter string) error 
 		devices = filtered
 	}
 
+	if group != "" {
+		tags := loadTags()
+		var grouped []ReportDevice
+		for _, d := range devices {
+			for _, t := range tags[strings.ToUpper(d.MAC)] {
+				if strings.EqualFold(t, group) {
+					grouped = append(grouped, d)
+					break
+				}
+			}
+		}
+		devices = grouped
+	}
+
 	var totalSamples int64
 	if err := db.QueryRow("SELECT COUNT(DISTINCT timestamp) FROM bandwidth_samples WHERE timestamp >= ?",
 		startTime.Format(time.RFC3339)).Scan(&totalSamples); err != nil {
@@ -772,6 +802,8 @@ func runReport(period string, jsonOut bool, nameFilter, macFilter string) error 
 			d.TotalKB = (d.TotalDownload + d.TotalUpload) * interval
 		}
 		printJSON(report)
+	} else if csvOut {
+		printReportCSV(report)
 	} else {
 		printReport(report)
 	}
@@ -1116,6 +1148,126 @@ func runAlias(remove bool, args []string) error {
 	aliases[mac] = name
 	saveAliases(aliases)
 	fmt.Printf("Set alias: %s -> %s\n", mac, name)
+	return nil
+}
+
+func loadTags() map[string][]string {
+	data, err := os.ReadFile(cfgPath("deco_tags.json"))
+	if err != nil {
+		return map[string][]string{}
+	}
+
+	var tags map[string][]string
+	if err := json.Unmarshal(data, &tags); err != nil {
+		return map[string][]string{}
+	}
+	return tags
+}
+
+func saveTags(tags map[string][]string) {
+	if err := ensureConfigDir(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating config dir: %v\n", err)
+		return
+	}
+
+	// Clean up empty tag lists
+	for mac, t := range tags {
+		if len(t) == 0 {
+			delete(tags, mac)
+		}
+	}
+
+	data, err := json.MarshalIndent(tags, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving tags: %v\n", err)
+		return
+	}
+
+	if err := os.WriteFile(cfgPath("deco_tags.json"), data, 0600); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving tags: %v\n", err)
+	}
+}
+
+func runAliasTag(args []string) error {
+	mac := strings.ToUpper(args[0])
+	if !validMAC(mac) {
+		return fmt.Errorf("invalid MAC address %q", mac)
+	}
+	tag := strings.ToLower(args[1])
+
+	tags := loadTags()
+	for _, t := range tags[mac] {
+		if t == tag {
+			fmt.Printf("%s already has tag %q\n", mac, tag)
+			return nil
+		}
+	}
+	tags[mac] = append(tags[mac], tag)
+	saveTags(tags)
+	fmt.Printf("Tagged %s with %q\n", mac, tag)
+	return nil
+}
+
+func runAliasUntag(args []string) error {
+	mac := strings.ToUpper(args[0])
+	if !validMAC(mac) {
+		return fmt.Errorf("invalid MAC address %q", mac)
+	}
+	tag := strings.ToLower(args[1])
+
+	tags := loadTags()
+	found := false
+	var newTags []string
+	for _, t := range tags[mac] {
+		if t == tag {
+			found = true
+		} else {
+			newTags = append(newTags, t)
+		}
+	}
+	if !found {
+		return fmt.Errorf("%s does not have tag %q", mac, tag)
+	}
+	tags[mac] = newTags
+	saveTags(tags)
+	fmt.Printf("Removed tag %q from %s\n", tag, mac)
+	return nil
+}
+
+func runAliasTags() error {
+	tags := loadTags()
+	aliases := loadAliases()
+
+	if len(tags) == 0 {
+		fmt.Println("No tags set. Usage: deco alias tag <MAC> <tag>")
+		return nil
+	}
+
+	// Group by tag
+	tagDevices := map[string][]string{} // tag -> list of "name (MAC)"
+	for mac, macTags := range tags {
+		name := mac
+		if alias, ok := aliases[mac]; ok {
+			name = alias
+		}
+		for _, t := range macTags {
+			tagDevices[t] = append(tagDevices[t], fmt.Sprintf("%s (%s)", name, mac))
+		}
+	}
+
+	tagNames := make([]string, 0, len(tagDevices))
+	for t := range tagDevices {
+		tagNames = append(tagNames, t)
+	}
+	sort.Strings(tagNames)
+
+	for _, t := range tagNames {
+		fmt.Printf("\n[%s]\n", t)
+		sort.Strings(tagDevices[t])
+		for _, d := range tagDevices[t] {
+			fmt.Printf("  %s\n", d)
+		}
+	}
 	return nil
 }
 

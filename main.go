@@ -151,11 +151,13 @@ func monitorCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			interval, _ := cmd.Flags().GetInt("interval")
 			notify, _ := cmd.Flags().GetBool("notify")
-			return runMonitor(interval, notify)
+			alert, _ := cmd.Flags().GetInt("alert")
+			return runMonitor(interval, notify, alert)
 		},
 	}
 	cmd.Flags().IntP("interval", "i", 60, "Polling interval in seconds")
 	cmd.Flags().Bool("notify", false, "Alert on new MAC addresses")
+	cmd.Flags().Int("alert", 0, "Alert when any device exceeds this KB/s (0 = disabled)")
 	return cmd
 }
 
@@ -177,14 +179,18 @@ Periods: today (default), hour, all`,
 				period = args[0]
 			}
 			jsonOut, _ := cmd.Flags().GetBool("json")
+			csvOut, _ := cmd.Flags().GetBool("csv")
 			nameFilter, _ := cmd.Flags().GetString("name")
 			macFilter, _ := cmd.Flags().GetString("mac")
-			return runReport(period, jsonOut, nameFilter, macFilter)
+			group, _ := cmd.Flags().GetString("group")
+			return runReport(period, jsonOut, csvOut, nameFilter, macFilter, group)
 		},
 	}
 	cmd.Flags().BoolP("json", "j", false, "Output as JSON")
+	cmd.Flags().Bool("csv", false, "Output as CSV")
 	cmd.Flags().StringP("name", "n", "", "Filter by device name")
 	cmd.Flags().StringP("mac", "m", "", "Filter by MAC address")
+	cmd.Flags().StringP("group", "g", "", "Filter by device tag")
 	cmd.AddCommand(reportNetworkCmd(), reportMeshCmd())
 	return cmd
 }
@@ -343,7 +349,40 @@ Usage:
 		Args: cobra.ArbitraryArgs,
 	}
 	cmd.Flags().BoolP("remove", "r", false, "Remove an alias")
+	cmd.AddCommand(aliasTagCmd(), aliasUntagCmd(), aliasTagsCmd())
 	return cmd
+}
+
+func aliasTagCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "tag <MAC> <tag>",
+		Short: "Add a tag to a device",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAliasTag(args)
+		},
+	}
+}
+
+func aliasUntagCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "untag <MAC> <tag>",
+		Short: "Remove a tag from a device",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAliasUntag(args)
+		},
+	}
+}
+
+func aliasTagsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "tags",
+		Short: "List all device tags",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runAliasTags()
+		},
+	}
 }
 
 func chatCmd() *cobra.Command {
@@ -362,6 +401,7 @@ Requires Ollama running locally (ollama serve). Set OLLAMA_HOST to override URL.
 			url, _ := cmd.Flags().GetString("ollama-url")
 			compact, _ := cmd.Flags().GetBool("compact")
 			listModels, _ := cmd.Flags().GetBool("list-models")
+			showContext, _ := cmd.Flags().GetBool("show-context")
 
 			// Resolve OLLAMA_HOST early for --list-models
 			if url == "http://localhost:11434" {
@@ -378,13 +418,14 @@ Requires Ollama running locally (ollama serve). Set OLLAMA_HOST to override URL.
 			if len(args) > 0 {
 				query = args[0]
 			}
-			return runChat(model, url, query, compact)
+			return runChat(model, url, query, compact, showContext)
 		},
 	}
 	cmd.Flags().String("model", "llama3.2", "Ollama model to use")
 	cmd.Flags().String("ollama-url", "http://localhost:11434", "Ollama API base URL")
 	cmd.Flags().Bool("compact", false, "Use smaller context window (fewer devices/snapshots)")
 	cmd.Flags().Bool("list-models", false, "List available Ollama models and exit")
+	cmd.Flags().Bool("show-context", false, "Print system prompt to stderr and exit")
 	return cmd
 }
 

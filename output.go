@@ -183,6 +183,33 @@ func printReport(report *Report) {
 		formatBytes(float64(grandDown)), formatBytes(float64(grandUp)), formatBytes(float64(grandDown+grandUp)))
 }
 
+func printReportCSV(report *Report) {
+	aliases := loadAliases()
+	interval := int64(report.IntervalSeconds)
+
+	fmt.Println("mac,name,ip,connection,samples,download_kb,upload_kb,total_kb")
+	for _, d := range report.Devices {
+		totalDown := d.TotalDownload * interval
+		totalUp := d.TotalUpload * interval
+		total := totalDown + totalUp
+		if total == 0 {
+			continue
+		}
+
+		name := d.Name
+		if alias, ok := aliases[strings.ToUpper(d.MAC)]; ok {
+			name = alias
+		}
+		// Escape for CSV
+		if strings.ContainsAny(name, ",\"") {
+			name = "\"" + strings.ReplaceAll(name, "\"", "\"\"") + "\""
+		}
+
+		fmt.Printf("%s,%s,%s,%s,%d,%d,%d,%d\n",
+			d.MAC, name, d.IP, d.Connection, d.SampleCount, totalDown, totalUp, total)
+	}
+}
+
 func printNetworkReport(entries []NetworkReportEntry, period string) {
 	fmt.Println(strings.Repeat("=", 70))
 	fmt.Printf("NETWORK REPORT - %s\n", period)
