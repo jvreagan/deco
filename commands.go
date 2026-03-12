@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -440,7 +442,7 @@ func runPoll(interval int) error {
 	})
 }
 
-func runMonitor(interval int, notify bool, alertThreshold int) error {
+func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string) error {
 	var knownMACs map[string]bool
 	var aliases map[string]string
 
@@ -459,6 +461,9 @@ func runMonitor(interval int, notify bool, alertThreshold int) error {
 			if alertThreshold > 0 {
 				aliases = loadAliases()
 				fmt.Printf("Bandwidth alert threshold: %dKB/s\n", alertThreshold)
+			}
+			if webhookURL != "" {
+				fmt.Printf("Webhook: %s\n", webhookURL)
 			}
 			fmt.Println("Press Ctrl+C to stop")
 		},
@@ -488,7 +493,7 @@ func runMonitor(interval int, notify bool, alertThreshold int) error {
 					if notify && knownMACs != nil {
 						macUpper := strings.ToUpper(c.MAC)
 						if !knownMACs[macUpper] {
-							notifyNewMAC(c.MAC, c.Name, c.IP)
+							notifyNewMAC(c.MAC, c.Name, c.IP, webhookURL)
 							knownMACs[macUpper] = true
 						}
 					}
@@ -501,6 +506,12 @@ func runMonitor(interval int, notify bool, alertThreshold int) error {
 							}
 							fmt.Printf("[%s] ALERT: %s — %dKB/s (threshold: %dKB/s)\n",
 								ts, name, rate, alertThreshold)
+							sendWebhook(webhookURL, WebhookPayload{
+								Event:     "bandwidth_alert",
+								Timestamp: time.Now().Format(time.RFC3339),
+								Text:      fmt.Sprintf("ALERT: %s — %dKB/s (threshold: %dKB/s)", name, rate, alertThreshold),
+								Data:      BandwidthAlertEvent{MAC: c.MAC, Name: name, RateKBps: rate, Threshold: alertThreshold},
+							})
 						}
 					}
 				}
@@ -595,7 +606,30 @@ func loadKnownMACs(db *sql.DB) map[string]bool {
 	return known
 }
 
-func notifyNewMAC(mac, name, ip string) {
+func sendWebhook(webhookURL string, payload WebhookPayload) {
+	if webhookURL == "" {
+		return
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		logWarn("webhook marshal error: %v", err)
+		return
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post(webhookURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		logWarn("webhook POST error: %v", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		logWarn("webhook returned status %d", resp.StatusCode)
+	}
+}
+
+func notifyNewMAC(mac, name, ip, webhookURL string) {
 	msg := fmt.Sprintf("NEW DEVICE: %s (%s) at %s", name, mac, ip)
 	logInfo("%s", msg)
 
@@ -603,6 +637,175 @@ func notifyNewMAC(mac, name, ip string) {
 	cmd := exec.Command("osascript", "-e",
 		fmt.Sprintf(`display notification "%s" with title "Deco: New Device"`, msg))
 	cmd.Run()
+
+	sendWebhook(webhookURL, WebhookPayload{
+		Event:     "new_device",
+		Timestamp: time.Now().Format(time.RFC3339),
+		Text:      msg,
+		Data:      NewDeviceEvent{MAC: mac, Name: name, IP: ip},
+	})
+}
+
+func resolveDeviceMAC(db *sql.DB, identifier string) (string, error) {
+	// If it looks like a MAC, normalize and return it
+	if validMAC(identifier) {
+		return strings.ToUpper(identifier), nil
+	}
+
+	// Check aliases (substring match)
+	aliases := loadAliases()
+	for mac, alias := range aliases {
+		if strings.Contains(strings.ToLower(alias), strings.ToLower(identifier)) {
+			return mac, nil
+		}
+	}
+
+	// Search bandwidth_samples name field (LIKE)
+	var mac string
+	err := db.QueryRow(`SELECT mac FROM bandwidth_samples WHERE LOWER(name) LIKE ? LIMIT 1`,
+		"%"+strings.ToLower(identifier)+"%").Scan(&mac)
+	if err == nil {
+		return strings.ToUpper(mac), nil
+	}
+
+	return "", fmt.Errorf("device %q not found", identifier)
+}
+
+func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
+	db, err := initDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	mac, err := resolveDeviceMAC(db, identifier)
+	if err != nil {
+		return err
+	}
+
+	startTime, periodName := parsePeriod(period)
+	startStr := startTime.Format(time.RFC3339)
+
+	aliases := loadAliases()
+	alias := aliases[mac]
+
+	// Query 1: Aggregate totals
+	var name sql.NullString
+	var firstSeen, lastSeen sql.NullString
+	var totalSamples int64
+	var totalDown, totalUp float64
+	var maxDown, maxUp int64
+
+	err = db.QueryRow(`
+		SELECT
+			name,
+			MIN(timestamp) as first_seen,
+			MAX(timestamp) as last_seen,
+			COUNT(*) as samples,
+			SUM(download_kbps) as total_down,
+			SUM(upload_kbps) as total_up,
+			MAX(download_kbps) as max_down,
+			MAX(upload_kbps) as max_up
+		FROM bandwidth_samples
+		WHERE UPPER(mac) = ? AND timestamp >= ?`,
+		mac, startStr).Scan(&name, &firstSeen, &lastSeen, &totalSamples, &totalDown, &totalUp, &maxDown, &maxUp)
+	if err != nil {
+		return fmt.Errorf("query error: %v", err)
+	}
+
+	if totalSamples == 0 {
+		return fmt.Errorf("no data for device %s in period %s", mac, periodName)
+	}
+
+	intervalSec := estimateInterval(db, startTime)
+
+	report := &DeviceReport{
+		MAC:             mac,
+		Name:            name.String,
+		Alias:           alias,
+		Period:          periodName,
+		StartTime:       startStr,
+		QueryTime:       time.Now().Format(time.RFC3339),
+		FirstSeen:       firstSeen.String,
+		LastSeen:        lastSeen.String,
+		IntervalSeconds: intervalSec,
+		TotalSamples:    totalSamples,
+		TotalDownloadKB: totalDown * float64(intervalSec),
+		TotalUploadKB:   totalUp * float64(intervalSec),
+		MaxDownloadKBps: maxDown,
+		MaxUploadKBps:   maxUp,
+	}
+
+	// Query 2: Hourly timeline
+	rows, err := db.Query(`
+		SELECT
+			strftime('%Y-%m-%dT%H:00:00', timestamp) as hour,
+			SUM(download_kbps) as down,
+			SUM(upload_kbps) as up,
+			COUNT(*) as samples
+		FROM bandwidth_samples
+		WHERE UPPER(mac) = ? AND timestamp >= ?
+		GROUP BY hour
+		ORDER BY hour`,
+		mac, startStr)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var b DeviceTimelineBucket
+			var down, up float64
+			if err := rows.Scan(&b.Timestamp, &down, &up, &b.SampleCount); err == nil {
+				b.DownloadKB = down * float64(intervalSec)
+				b.UploadKB = up * float64(intervalSec)
+				report.Timeline = append(report.Timeline, b)
+			}
+		}
+	}
+
+	// Query 3: Connection type breakdown
+	connRows, err := db.Query(`
+		SELECT connection, COUNT(*) as samples
+		FROM bandwidth_samples
+		WHERE UPPER(mac) = ? AND timestamp >= ?
+		GROUP BY connection
+		ORDER BY samples DESC`,
+		mac, startStr)
+	if err == nil {
+		defer connRows.Close()
+		for connRows.Next() {
+			var cb DeviceConnectionBreakdown
+			if err := connRows.Scan(&cb.Connection, &cb.Samples); err == nil {
+				cb.Percent = float64(cb.Samples) / float64(totalSamples) * 100
+				report.Connections = append(report.Connections, cb)
+			}
+		}
+	}
+
+	// Query 4: IP history
+	ipRows, err := db.Query(`
+		SELECT ip, MIN(timestamp) as first_seen, MAX(timestamp) as last_seen, COUNT(*) as samples
+		FROM bandwidth_samples
+		WHERE UPPER(mac) = ? AND timestamp >= ? AND ip IS NOT NULL AND ip != ''
+		GROUP BY ip
+		ORDER BY first_seen`,
+		mac, startStr)
+	if err == nil {
+		defer ipRows.Close()
+		for ipRows.Next() {
+			var iph DeviceIPHistory
+			if err := ipRows.Scan(&iph.IP, &iph.FirstSeen, &iph.LastSeen, &iph.Samples); err == nil {
+				report.IPHistory = append(report.IPHistory, iph)
+			}
+		}
+	}
+
+	if jsonOut {
+		printJSON(report)
+	} else if csvOut {
+		printDeviceReportCSV(report)
+	} else {
+		printDeviceReport(report)
+	}
+	return nil
 }
 
 func parsePeriod(period string) (time.Time, string) {

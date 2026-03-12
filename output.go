@@ -308,6 +308,63 @@ func printMeshReport(entries []MeshReportEntry, period string) {
 	fmt.Printf("\nSnapshots: %d\n", len(entries))
 }
 
+func printDeviceReport(report *DeviceReport) {
+	name := report.Name
+	if report.Alias != "" {
+		name = report.Alias
+	}
+
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Printf("DEVICE REPORT - %s\n", name)
+	fmt.Println(strings.Repeat("=", 70))
+	fmt.Printf("MAC:    %s\n", report.MAC)
+	if report.Alias != "" {
+		fmt.Printf("Alias:  %s\n", report.Alias)
+	}
+	fmt.Printf("Period: %s\n", report.Period)
+	fmt.Printf("First:  %s\n", report.FirstSeen)
+	fmt.Printf("Last:   %s\n", report.LastSeen)
+	fmt.Printf("Samples: %d (every %ds)\n", report.TotalSamples, report.IntervalSeconds)
+
+	fmt.Printf("\n--- Bandwidth Summary ---\n")
+	fmt.Printf("  Download: %s (peak %d KB/s)\n", formatBytes(report.TotalDownloadKB), report.MaxDownloadKBps)
+	fmt.Printf("  Upload:   %s (peak %d KB/s)\n", formatBytes(report.TotalUploadKB), report.MaxUploadKBps)
+	fmt.Printf("  Total:    %s\n", formatBytes(report.TotalDownloadKB+report.TotalUploadKB))
+
+	if len(report.Connections) > 0 {
+		fmt.Printf("\n--- Connection Types ---\n")
+		for _, c := range report.Connections {
+			fmt.Printf("  %-20s %d samples (%.1f%%)\n", c.Connection, c.Samples, c.Percent)
+		}
+	}
+
+	if len(report.IPHistory) > 0 {
+		fmt.Printf("\n--- IP History ---\n")
+		fmt.Printf("  %-16s %-24s %-24s %s\n", "IP", "FIRST SEEN", "LAST SEEN", "SAMPLES")
+		fmt.Printf("  %s\n", strings.Repeat("-", 75))
+		for _, ip := range report.IPHistory {
+			fmt.Printf("  %-16s %-24s %-24s %d\n", ip.IP, ip.FirstSeen, ip.LastSeen, ip.Samples)
+		}
+	}
+
+	if len(report.Timeline) > 0 {
+		fmt.Printf("\n--- Hourly Bandwidth ---\n")
+		fmt.Printf("  %-22s %-12s %-12s %s\n", "HOUR", "DOWNLOAD", "UPLOAD", "SAMPLES")
+		fmt.Printf("  %s\n", strings.Repeat("-", 55))
+		for _, b := range report.Timeline {
+			fmt.Printf("  %-22s %-12s %-12s %d\n",
+				b.Timestamp, formatBytes(b.DownloadKB), formatBytes(b.UploadKB), b.SampleCount)
+		}
+	}
+}
+
+func printDeviceReportCSV(report *DeviceReport) {
+	fmt.Println("hour,download_kb,upload_kb,samples")
+	for _, b := range report.Timeline {
+		fmt.Printf("%s,%.0f,%.0f,%d\n", b.Timestamp, b.DownloadKB, b.UploadKB, b.SampleCount)
+	}
+}
+
 // connAbbrev returns a short label for a connection type.
 func connAbbrev(conn string) string {
 	switch conn {

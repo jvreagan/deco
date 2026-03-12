@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1151,7 +1152,7 @@ func TestLoadKnownMACs(t *testing.T) {
 
 func TestNotifyNewMAC(t *testing.T) {
 	// Just verify it doesn't panic
-	notifyNewMAC("AA-BB-CC-DD-EE-FF", "TestDevice", "192.168.68.100")
+	notifyNewMAC("AA-BB-CC-DD-EE-FF", "TestDevice", "192.168.68.100", "")
 }
 
 // ==================== REPORT NETWORK/MESH TESTS ====================
@@ -2490,7 +2491,7 @@ func TestRunMonitorNoConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	if err := runMonitor(60, false, 0); err == nil {
+	if err := runMonitor(60, false, 0, ""); err == nil {
 		t.Error("runMonitor should return error without config")
 	}
 }
@@ -2940,5 +2941,224 @@ func TestAliasTagSubcommands(t *testing.T) {
 		if !found[name] {
 			t.Errorf("expected subcommand %q on alias cmd", name)
 		}
+	}
+}
+
+// ==================== WEBHOOK TESTS ====================
+
+func TestSendWebhook(t *testing.T) {
+	var received []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	sendWebhook(srv.URL, WebhookPayload{
+		Event:     "new_device",
+		Timestamp: "2026-03-11T12:00:00Z",
+		Text:      "test message",
+		Data:      NewDeviceEvent{MAC: "AA-BB-CC-DD-EE-FF", Name: "Dev", IP: "192.168.68.100"},
+	})
+
+	if len(received) == 0 {
+		t.Fatal("webhook server received no data")
+	}
+	if !strings.Contains(string(received), `"event":"new_device"`) {
+		t.Errorf("expected event field in payload, got: %s", received)
+	}
+	if !strings.Contains(string(received), `"mac":"AA-BB-CC-DD-EE-FF"`) {
+		t.Errorf("expected MAC in payload, got: %s", received)
+	}
+}
+
+func TestSendWebhookEmptyURL(t *testing.T) {
+	// Should be a no-op, not panic
+	sendWebhook("", WebhookPayload{Event: "test"})
+}
+
+func TestSendWebhookBadURL(t *testing.T) {
+	// Should log warning, not panic
+	sendWebhook("http://127.0.0.1:1", WebhookPayload{Event: "test"})
+}
+
+func TestMonitorCmdWebhookFlag(t *testing.T) {
+	cmd := monitorCmd()
+	webhook, err := cmd.Flags().GetString("webhook")
+	if err != nil {
+		t.Fatalf("webhook flag error: %v", err)
+	}
+	if webhook != "" {
+		t.Error("expected default webhook=empty")
+	}
+}
+
+// ==================== DEVICE REPORT TESTS ====================
+
+func TestResolveDeviceMAC(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Set up alias
+	aliases := map[string]string{"AA-BB-CC-DD-EE-FF": "MyPhone"}
+	saveAliases(aliases)
+
+	// Insert sample with a name
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "garbled_name", "192.168.68.100", "WiFi 5GHz", 100, 50)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "11-22-33-44-55-66", "Xbox", "192.168.68.71", "Wired", 200, 100)
+
+	tests := []struct {
+		name    string
+		input   string
+		wantMAC string
+		wantErr bool
+	}{
+		{"by MAC", "AA-BB-CC-DD-EE-FF", "AA-BB-CC-DD-EE-FF", false},
+		{"by MAC lowercase", "aa-bb-cc-dd-ee-ff", "AA-BB-CC-DD-EE-FF", false},
+		{"by alias substring", "MyPhone", "AA-BB-CC-DD-EE-FF", false},
+		{"by name substring", "Xbox", "11-22-33-44-55-66", false},
+		{"not found", "nonexistent_device", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mac, err := resolveDeviceMAC(db, tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if mac != tt.wantMAC {
+				t.Errorf("resolveDeviceMAC(%q) = %q, want %q", tt.input, mac, tt.wantMAC)
+			}
+		})
+	}
+}
+
+func TestRunReportDevice(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Insert samples for a device across multiple hours
+	base := time.Now().Add(-2 * time.Hour)
+	for i := 0; i < 5; i++ {
+		ts := base.Add(time.Duration(i) * 30 * time.Minute).Format(time.RFC3339)
+		db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, download_kbps, upload_kbps)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "TestPhone", "192.168.68.100", "WiFi 5GHz", 100, 50)
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReportDevice("AA-BB-CC-DD-EE-FF", "today", false, false)
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReportDevice failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "DEVICE REPORT") {
+		t.Error("output should contain DEVICE REPORT header")
+	}
+	if !strings.Contains(output, "TestPhone") {
+		t.Error("output should contain device name")
+	}
+	if !strings.Contains(output, "AA-BB-CC-DD-EE-FF") {
+		t.Error("output should contain device MAC")
+	}
+}
+
+func TestRunReportDeviceJSON(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "TestDev", "192.168.68.100", "WiFi 5GHz", 100, 50)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReportDevice("AA-BB-CC-DD-EE-FF", "today", true, false)
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReportDevice JSON failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, `"timeline"`) {
+		t.Error("JSON output should contain timeline field")
+	}
+	if !strings.Contains(output, `"mac"`) {
+		t.Error("JSON output should contain mac field")
+	}
+}
+
+func TestRunReportDeviceNotFound(t *testing.T) {
+	setupTestDB(t)
+
+	err := runReportDevice("nonexistent", "today", false, false)
+	if err == nil {
+		t.Error("expected error for nonexistent device")
+	}
+}
+
+func TestRunReportDeviceCSV(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "TestDev", "192.168.68.100", "WiFi 5GHz", 100, 50)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReportDevice("AA-BB-CC-DD-EE-FF", "today", false, true)
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReportDevice CSV failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.HasPrefix(output, "hour,download_kb,upload_kb,samples\n") {
+		t.Errorf("expected CSV header, got: %s", output)
+	}
+}
+
+func TestReportDeviceSubcommand(t *testing.T) {
+	cmd := reportCmd()
+	found := false
+	for _, sub := range cmd.Commands() {
+		if sub.Name() == "device" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("report cmd should have 'device' subcommand")
 	}
 }

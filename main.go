@@ -44,6 +44,7 @@ func init() {
 		unblockCmd(),
 		aliasCmd(),
 		chatCmd(),
+		dashboardCmd(),
 		completionCmd(),
 	)
 }
@@ -152,12 +153,14 @@ func monitorCmd() *cobra.Command {
 			interval, _ := cmd.Flags().GetInt("interval")
 			notify, _ := cmd.Flags().GetBool("notify")
 			alert, _ := cmd.Flags().GetInt("alert")
-			return runMonitor(interval, notify, alert)
+			webhook, _ := cmd.Flags().GetString("webhook")
+			return runMonitor(interval, notify, alert, webhook)
 		},
 	}
 	cmd.Flags().IntP("interval", "i", 60, "Polling interval in seconds")
 	cmd.Flags().Bool("notify", false, "Alert on new MAC addresses")
 	cmd.Flags().Int("alert", 0, "Alert when any device exceeds this KB/s (0 = disabled)")
+	cmd.Flags().String("webhook", "", "Webhook URL for POST notifications")
 	return cmd
 }
 
@@ -191,7 +194,7 @@ Periods: today (default), hour, all`,
 	cmd.Flags().StringP("name", "n", "", "Filter by device name")
 	cmd.Flags().StringP("mac", "m", "", "Filter by MAC address")
 	cmd.Flags().StringP("group", "g", "", "Filter by device tag")
-	cmd.AddCommand(reportNetworkCmd(), reportMeshCmd())
+	cmd.AddCommand(reportNetworkCmd(), reportMeshCmd(), reportDeviceCmd())
 	return cmd
 }
 
@@ -228,6 +231,35 @@ func reportMeshCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolP("json", "j", false, "Output as JSON")
+	return cmd
+}
+
+func reportDeviceCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "device <MAC|name> [period]",
+		Short: "Detailed history for a single device",
+		Long: `Show detailed bandwidth history for a single device.
+
+  deco report device Xbox today
+  deco report device AA-BB-CC-DD-EE-FF --json
+  deco report device MyPhone hour --csv
+
+The device can be specified by MAC address, alias, or name substring.
+Periods: today (default), hour, all`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			identifier := args[0]
+			period := "today"
+			if len(args) > 1 {
+				period = args[1]
+			}
+			jsonOut, _ := cmd.Flags().GetBool("json")
+			csvOut, _ := cmd.Flags().GetBool("csv")
+			return runReportDevice(identifier, period, jsonOut, csvOut)
+		},
+	}
+	cmd.Flags().BoolP("json", "j", false, "Output as JSON")
+	cmd.Flags().Bool("csv", false, "Output as CSV")
 	return cmd
 }
 
@@ -426,6 +458,20 @@ Requires Ollama running locally (ollama serve). Set OLLAMA_HOST to override URL.
 	cmd.Flags().Bool("compact", false, "Use smaller context window (fewer devices/snapshots)")
 	cmd.Flags().Bool("list-models", false, "List available Ollama models and exit")
 	cmd.Flags().Bool("show-context", false, "Print system prompt to stderr and exit")
+	return cmd
+}
+
+func dashboardCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "dashboard",
+		Short: "Live TUI dashboard",
+		Long:  "Launch a live terminal dashboard showing clients, network status, mesh nodes, and activity.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			interval, _ := cmd.Flags().GetInt("interval")
+			return runDashboard(interval)
+		},
+	}
+	cmd.Flags().IntP("interval", "i", 10, "Refresh interval in seconds")
 	return cmd
 }
 
