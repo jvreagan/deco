@@ -1,0 +1,4 @@
+reportName: Deco Network Tool — Test Report
+plugins:
+  - junit-xml-plugin
+  - behaviors-plugin

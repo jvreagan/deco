@@ -3,3 +3,5 @@ deco_config.json
 deco
 dist/
 deco_aliases.json
+reporting/allure-results/
+reporting/allure-report/

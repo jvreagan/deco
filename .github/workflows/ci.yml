@@ -21,6 +21,9 @@ jobs:
 
       - run: go vet ./...
 
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@latest
+
       - name: staticcheck
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -29,12 +32,19 @@ jobs:
 
       - name: Test
         if: matrix.os != 'ubuntu-latest'
-        run: go test -v -race ./...
+        run: gotestsum --format testdox --junitfile junit.xml -- -race ./...
 
       - name: Test with coverage
         if: matrix.os == 'ubuntu-latest'
-        run: go test -v -race -coverprofile=coverage.out ./...
+        run: gotestsum --format testdox --junitfile junit.xml -- -race -coverprofile=coverage.out ./...
 
       - name: Coverage report
         if: matrix.os == 'ubuntu-latest'
         run: go tool cover -func=coverage.out
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: junit.xml
