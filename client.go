@@ -392,6 +392,10 @@ func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (
 
 	logDebug("%s -> %d (%d bytes, %s)", path, resp.StatusCode, len(body), time.Since(start))
 
+	if len(body) == 0 {
+		return nil, fmt.Errorf("empty response from router")
+	}
+
 	var responseData string
 
 	// Try parsing as JSON first
@@ -410,12 +414,16 @@ func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (
 	// Decrypt response
 	decrypted, err := aesDecrypt(responseData, dc.aesKey, dc.aesIV)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decrypt response: %v", err)
+	}
+
+	if len(decrypted) == 0 {
+		return nil, fmt.Errorf("empty decrypted response from router")
 	}
 
 	var decryptedResp map[string]interface{}
 	if err := json.Unmarshal(decrypted, &decryptedResp); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse response (%d bytes): %v", len(decrypted), err)
 	}
 
 	// Check for error_code in the decrypted response

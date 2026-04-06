@@ -5,3 +5,4 @@ dist/
 deco_aliases.json
 reporting/allure-results/
 reporting/allure-report/
+autobacklog.yaml
