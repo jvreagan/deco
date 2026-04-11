@@ -1755,6 +1755,40 @@ func TestRunReportWithNameFilter(t *testing.T) {
 	}
 }
 
+func TestRunReportWithMACFilter(t *testing.T) {
+	db := setupTestDB(t)
+
+	ts := time.Now().Format(time.RFC3339)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "DeviceA", "192.168.68.100", "WiFi 5GHz", 100, 50)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, ts, "11-22-33-44-55-66", "DeviceB", "192.168.68.101", "Wired", 200, 100)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	err := runReport("today", false, false, "", "AA-BB-CC-DD-EE-FF", "")
+
+	w.Close()
+	os.Stdout = old
+
+	if err != nil {
+		t.Fatalf("runReport with MAC filter failed: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "DeviceA") {
+		t.Error("MAC-filtered output should contain DeviceA")
+	}
+	if strings.Contains(output, "DeviceB") {
+		t.Error("MAC-filtered output should NOT contain DeviceB")
+	}
+}
+
 func TestRunReportEmpty(t *testing.T) {
 	setupTestDB(t)
 
@@ -2473,7 +2507,7 @@ func TestRunWatchNoConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	if err := runWatch(5, "", ""); err == nil {
+	if err := runWatch(5, "", "", 10); err == nil {
 		t.Error("runWatch should return error without config")
 	}
 }
@@ -2482,7 +2516,7 @@ func TestRunPollNoConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	if err := runPoll(5); err == nil {
+	if err := runPoll(5, 10); err == nil {
 		t.Error("runPoll should return error without config")
 	}
 }
@@ -2491,7 +2525,7 @@ func TestRunMonitorNoConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	if err := runMonitor(60, false, 0, ""); err == nil {
+	if err := runMonitor(60, false, 0, "", 10); err == nil {
 		t.Error("runMonitor should return error without config")
 	}
 }
@@ -3162,3 +3196,4 @@ func TestReportDeviceSubcommand(t *testing.T) {
 		t.Error("report cmd should have 'device' subcommand")
 	}
 }
+

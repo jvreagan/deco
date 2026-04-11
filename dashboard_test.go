@@ -166,7 +166,7 @@ func TestDashboardAddActivityCap(t *testing.T) {
 	}
 
 	for i := 0; i < 60; i++ {
-		m.addActivity("event")
+		m = addActivity(m, "event")
 	}
 
 	if len(m.activity) != 50 {

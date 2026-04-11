@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -93,7 +94,7 @@ func TestStreamOllamaChat(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	response, err := streamOllamaChat(ts.URL, req, &buf)
+	response, err := streamOllamaChat(context.Background(), ts.URL, req, &buf)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +120,7 @@ func TestStreamOllamaChatError(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	_, err := streamOllamaChat(ts.URL, req, &buf)
+	_, err := streamOllamaChat(context.Background(), ts.URL, req, &buf)
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
@@ -136,7 +137,7 @@ func TestStreamOllamaChatConnectionRefused(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	_, err := streamOllamaChat("http://127.0.0.1:1", req, &buf)
+	_, err := streamOllamaChat(context.Background(), "http://127.0.0.1:1", req, &buf)
 	if err == nil {
 		t.Fatal("expected error for connection refused")
 	}
@@ -170,7 +171,7 @@ func TestStreamOllamaChatEmptyChunks(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	response, err := streamOllamaChat(ts.URL, req, &buf)
+	response, err := streamOllamaChat(context.Background(), ts.URL, req, &buf)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -765,26 +766,24 @@ func TestSaveConversation(t *testing.T) {
 }
 
 func TestSaveConversationDefaultFilename(t *testing.T) {
-	// Save with empty path should generate a timestamped filename in home dir
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("cannot determine home dir")
-	}
+	// Redirect HOME to a temp dir so the test doesn't write to the real home
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
 
 	messages := []ollamaMessage{
 		{Role: "user", Content: "test"},
 	}
 
-	err = saveConversation(messages, "")
+	err := saveConversation(messages, "")
 	if err != nil {
 		t.Fatalf("saveConversation with default path failed: %v", err)
 	}
 
-	// Find and clean up the generated file
+	// Verify the file was created in the temp dir
 	pattern := fmt.Sprintf("deco-chat-%s-*.md", time.Now().Format("2006-01-02"))
-	matches, _ := filepath.Glob(filepath.Join(home, pattern))
-	for _, m := range matches {
-		os.Remove(m)
+	matches, _ := filepath.Glob(filepath.Join(tmpDir, pattern))
+	if len(matches) == 0 {
+		t.Error("expected generated file in temp home dir")
 	}
 }
 

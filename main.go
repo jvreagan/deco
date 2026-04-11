@@ -69,7 +69,8 @@ func clientsCmd() *cobra.Command {
 				if interval == 0 {
 					interval = 5
 				}
-				return runWatch(interval, nameFilter, macFilter)
+				maxFailures, _ := cmd.Flags().GetInt("max-failures")
+				return runWatch(interval, nameFilter, macFilter, maxFailures)
 			}
 			jsonOut, _ := cmd.Flags().GetBool("json")
 			return runClients(jsonOut, nameFilter, macFilter)
@@ -80,6 +81,7 @@ func clientsCmd() *cobra.Command {
 	cmd.Flags().IntP("interval", "i", 5, "Refresh interval in seconds")
 	cmd.Flags().StringP("name", "n", "", "Filter by device name")
 	cmd.Flags().StringP("mac", "m", "", "Filter by MAC address")
+	cmd.Flags().Int("max-failures", 10, "Max consecutive failures before giving up")
 	return cmd
 }
 
@@ -138,10 +140,12 @@ func pollCmd() *cobra.Command {
 		Short: "Start bandwidth monitoring",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			interval, _ := cmd.Flags().GetInt("interval")
-			return runPoll(interval)
+			maxFailures, _ := cmd.Flags().GetInt("max-failures")
+			return runPoll(interval, maxFailures)
 		},
 	}
 	cmd.Flags().IntP("interval", "i", 5, "Polling interval in seconds")
+	cmd.Flags().Int("max-failures", 10, "Max consecutive failures before giving up")
 	return cmd
 }
 
@@ -154,13 +158,15 @@ func monitorCmd() *cobra.Command {
 			notify, _ := cmd.Flags().GetBool("notify")
 			alert, _ := cmd.Flags().GetInt("alert")
 			webhook, _ := cmd.Flags().GetString("webhook")
-			return runMonitor(interval, notify, alert, webhook)
+			maxFailures, _ := cmd.Flags().GetInt("max-failures")
+			return runMonitor(interval, notify, alert, webhook, maxFailures)
 		},
 	}
 	cmd.Flags().IntP("interval", "i", 60, "Polling interval in seconds")
 	cmd.Flags().Bool("notify", false, "Alert on new MAC addresses")
 	cmd.Flags().Int("alert", 0, "Alert when any device exceeds this KB/s (0 = disabled)")
 	cmd.Flags().String("webhook", "", "Webhook URL for POST notifications")
+	cmd.Flags().Int("max-failures", 10, "Max consecutive failures before giving up")
 	return cmd
 }
 
@@ -449,8 +455,8 @@ Requires Ollama running locally (ollama serve). Set OLLAMA_HOST to override URL.
 			return runChat(model, url, query, compact, showContext)
 		},
 	}
-	cmd.Flags().String("model", "llama3.2", "Ollama model to use")
-	cmd.Flags().String("ollama-url", "http://localhost:11434", "Ollama API base URL")
+	cmd.Flags().String("model", defaultOllamaModel, "Ollama model to use")
+	cmd.Flags().String("ollama-url", defaultOllamaURL, "Ollama API base URL")
 	cmd.Flags().Bool("compact", false, "Use smaller context window (fewer devices/snapshots)")
 	cmd.Flags().Bool("list-models", false, "List available Ollama models and exit")
 	cmd.Flags().Bool("show-context", false, "Print system prompt to stderr and exit")

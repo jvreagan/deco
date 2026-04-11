@@ -18,6 +18,8 @@ type activityEntry struct {
 // dashboardModel is the bubbletea model for the live dashboard.
 // The host and password fields are immutable after initialization and safe to
 // read from goroutines (e.g., fetchData commands).
+// The decoClient field is a shared pointer that is created once and reused
+// across ticks. If a request fails, the client is re-authorized automatically.
 type dashboardModel struct {
 	clients    *ClientList
 	network    *NetworkInfo
@@ -26,8 +28,9 @@ type dashboardModel struct {
 	activity   []activityEntry
 	lastUpdate time.Time
 	err        error
-	host       string   // immutable after init; read by fetchData goroutines
-	password   string   // immutable after init; read by fetchData goroutines
+	host       string       // immutable after init; read by fetchData goroutines
+	password   string       // immutable after init; read by fetchData goroutines
+	decoClient *DecoClient  // shared; created once, reused across ticks
 	interval   int
 	width      int
 	height     int
@@ -53,21 +56,21 @@ func tickCmd(d time.Duration) tea.Cmd {
 	})
 }
 
-func fetchData(host, password string) tea.Cmd {
+func fetchData(dc *DecoClient) tea.Cmd {
 	return func() tea.Msg {
-		client := NewDecoClient(host, password)
-		if err := client.Authorize(); err != nil {
+		// Ensure we have a valid session; re-authorize if needed.
+		if err := dc.EnsureAuthorized(); err != nil {
 			return dataMsg{err: err}
 		}
-		defer client.Logout()
 
-		clients, cErr := client.GetClients()
-		network, nErr := client.GetNetwork()
-		mesh, mErr := client.GetMesh()
-		wireless, wErr := client.GetWireless()
+		clients, cErr := dc.GetClients()
+		network, nErr := dc.GetNetwork()
+		mesh, mErr := dc.GetMesh()
+		wireless, wErr := dc.GetWireless()
 
-		// If all failed, report the first error
+		// If all failed, the session likely expired — invalidate so next tick re-auths.
 		if cErr != nil && nErr != nil && mErr != nil && wErr != nil {
+			dc.Invalidate()
 			return dataMsg{err: cErr}
 		}
 
@@ -99,7 +102,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return m, tea.Batch(
-			fetchData(m.host, m.password),
+			fetchData(m.decoClient),
 			tickCmd(time.Duration(m.interval)*time.Second),
 		)
 
@@ -107,7 +110,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastUpdate = time.Now()
 		if msg.err != nil {
 			m.err = msg.err
-			m.addActivity("Error: " + msg.err.Error())
+			m = addActivity(m, "Error: "+msg.err.Error())
 			return m, nil
 		}
 		m.err = nil
@@ -119,7 +122,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !m.knownMACs[mac] {
 					if len(m.knownMACs) > 0 { // skip first load
 						name := c.Name
-						m.addActivity(fmt.Sprintf("New: %s (%s)", name, mac))
+						m = addActivity(m, fmt.Sprintf("New: %s (%s)", name, mac))
 					}
 					m.knownMACs[mac] = true
 				}
@@ -130,13 +133,13 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.network = msg.network
 		m.mesh = msg.mesh
 		m.wireless = msg.wireless
-		m.addActivity("Updated")
+		m = addActivity(m, "Updated")
 	}
 
 	return m, nil
 }
 
-func (m *dashboardModel) addActivity(text string) {
+func addActivity(m dashboardModel, text string) dashboardModel {
 	m.activity = append(m.activity, activityEntry{
 		Time: time.Now().Format("15:04:05"),
 		Text: text,
@@ -144,6 +147,7 @@ func (m *dashboardModel) addActivity(text string) {
 	if len(m.activity) > 50 {
 		m.activity = m.activity[len(m.activity)-50:]
 	}
+	return m
 }
 
 var (
@@ -348,11 +352,14 @@ func runDashboard(interval int) error {
 		return err
 	}
 
+	dc := NewDecoClient(config.Host, config.Password)
+
 	m := dashboardModel{
-		host:      config.Host,
-		password:  config.Password,
-		interval:  interval,
-		knownMACs: map[string]bool{},
+		host:       config.Host,
+		password:   config.Password,
+		decoClient: dc,
+		interval:   interval,
+		knownMACs:  map[string]bool{},
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())

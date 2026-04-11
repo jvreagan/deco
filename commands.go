@@ -94,8 +94,18 @@ func connectClient() (*DecoClient, *Config, error) {
 	}
 
 	client := NewDecoClient(config.Host, config.Password)
-	if err := client.Authorize(); err != nil {
-		return nil, nil, fmt.Errorf("connecting: %v", err)
+
+	var authErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if authErr = client.Authorize(); authErr == nil {
+			break
+		}
+		if attempt < 3 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+	if authErr != nil {
+		return nil, nil, fmt.Errorf("connecting (after 3 attempts): %v", authErr)
 	}
 
 	return client, config, nil
@@ -269,11 +279,12 @@ func pollLoop(cfg pollLoopConfig) error {
 	}
 }
 
-func runWatch(interval int, nameFilter, macFilter string) error {
+func runWatch(interval int, nameFilter, macFilter string, maxFailures int) error {
 	return pollLoop(pollLoopConfig{
-		interval: interval,
-		label:    "Watch",
-		needsDB:  false,
+		interval:    interval,
+		label:       "Watch",
+		needsDB:     false,
+		maxFailures: maxFailures,
 		work: func(ctx context.Context, client *DecoClient, db *sql.DB, cycle int) error {
 			data, err := client.GetClients()
 			if err != nil {
@@ -409,11 +420,12 @@ func runAPI(endpoint, body string) error {
 	return nil
 }
 
-func runPoll(interval int) error {
+func runPoll(interval int, maxFailures int) error {
 	return pollLoop(pollLoopConfig{
-		interval: interval,
-		label:    "Poll",
-		needsDB:  true,
+		interval:    interval,
+		label:       "Poll",
+		needsDB:     true,
+		maxFailures: maxFailures,
 		setup: func(db *sql.DB, size int64) {
 			fmt.Printf("Starting bandwidth monitor (polling every %ds)\n", interval)
 			fmt.Printf("Database: %s\n", dbPath)
@@ -452,14 +464,15 @@ func runPoll(interval int) error {
 	})
 }
 
-func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string) error {
+func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string, maxFailures int) error {
 	var knownMACs map[string]bool
 	var aliases map[string]string
 
 	return pollLoop(pollLoopConfig{
-		interval: interval,
-		label:    "Monitor",
-		needsDB:  true,
+		interval:    interval,
+		label:       "Monitor",
+		needsDB:     true,
+		maxFailures: maxFailures,
 		setup: func(db *sql.DB, size int64) {
 			fmt.Printf("Starting full network monitor (polling every %ds)\n", interval)
 			fmt.Printf("Database: %s\n", dbPath)
@@ -701,6 +714,9 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 		return err
 	}
 
+	if err := validatePeriod(period); err != nil {
+		return err
+	}
 	startTime, periodName := parsePeriod(period)
 	startStr := startTime.Format(time.RFC3339)
 
@@ -725,7 +741,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 			MAX(download_kbps) as max_down,
 			MAX(upload_kbps) as max_up
 		FROM bandwidth_samples
-		WHERE UPPER(mac) = ? AND timestamp >= ?`,
+		WHERE mac = ? AND timestamp >= ?`,
 		mac, startStr).Scan(&name, &firstSeen, &lastSeen, &totalSamples, &totalDown, &totalUp, &maxDown, &maxUp)
 	if err != nil {
 		return fmt.Errorf("query error: %v", err)
@@ -762,7 +778,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 			SUM(upload_kbps) as up,
 			COUNT(*) as samples
 		FROM bandwidth_samples
-		WHERE UPPER(mac) = ? AND timestamp >= ?
+		WHERE mac = ? AND timestamp >= ?
 		GROUP BY hour
 		ORDER BY hour`,
 		mac, startStr)
@@ -783,7 +799,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	connRows, err := db.Query(`
 		SELECT connection, COUNT(*) as samples
 		FROM bandwidth_samples
-		WHERE UPPER(mac) = ? AND timestamp >= ?
+		WHERE mac = ? AND timestamp >= ?
 		GROUP BY connection
 		ORDER BY samples DESC`,
 		mac, startStr)
@@ -802,7 +818,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	ipRows, err := db.Query(`
 		SELECT ip, MIN(timestamp) as first_seen, MAX(timestamp) as last_seen, COUNT(*) as samples
 		FROM bandwidth_samples
-		WHERE UPPER(mac) = ? AND timestamp >= ? AND ip IS NOT NULL AND ip != ''
+		WHERE mac = ? AND timestamp >= ? AND ip IS NOT NULL AND ip != ''
 		GROUP BY ip
 		ORDER BY first_seen`,
 		mac, startStr)
@@ -826,16 +842,49 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	return nil
 }
 
+// validPeriods defines the set of accepted period strings for reports.
+var validPeriods = map[string]bool{
+	"today": true,
+	"hour":  true,
+	"1h":    true,
+	"6h":    true,
+	"12h":   true,
+	"24h":   true,
+	"7d":    true,
+	"30d":   true,
+	"all":   true,
+}
+
 func parsePeriod(period string) (time.Time, string) {
 	switch period {
 	case "today":
 		now := time.Now()
 		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()), "Today"
-	case "hour":
+	case "hour", "1h":
 		return time.Now().Add(-1 * time.Hour), "Last hour"
+	case "6h":
+		return time.Now().Add(-6 * time.Hour), "Last 6 hours"
+	case "12h":
+		return time.Now().Add(-12 * time.Hour), "Last 12 hours"
+	case "24h":
+		return time.Now().Add(-24 * time.Hour), "Last 24 hours"
+	case "7d":
+		return time.Now().AddDate(0, 0, -7), "Last 7 days"
+	case "30d":
+		return time.Now().AddDate(0, 0, -30), "Last 30 days"
+	case "all":
+		return time.Time{}, "All time"
 	default:
 		return time.Time{}, "All time"
 	}
+}
+
+// validatePeriod returns an error if the given period string is not recognized.
+func validatePeriod(period string) error {
+	if !validPeriods[period] {
+		return fmt.Errorf("unknown period %q; valid periods: today, hour, 1h, 6h, 12h, 24h, 7d, 30d, all", period)
+	}
+	return nil
 }
 
 // estimateInterval derives the polling interval from sample timestamps.
@@ -878,6 +927,10 @@ func estimateInterval(db *sql.DB, since time.Time) int {
 }
 
 func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group string) error {
+	if err := validatePeriod(period); err != nil {
+		return err
+	}
+
 	db, err := initDB()
 	if err != nil {
 		return err
@@ -935,7 +988,12 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 		fmt.Fprintf(os.Stderr, "Warning: error iterating rows: %v\n", err)
 	}
 
-	// Query connection-type breakdown per device
+	// Query connection-type breakdown per device.
+	// This is a separate query because the main report query groups by mac only,
+	// while the breakdown needs GROUP BY mac, connection. Combining them into a
+	// single query would require a self-join or CTE with two different aggregation
+	// levels, adding complexity without meaningful performance benefit since both
+	// queries scan the same index (idx_timestamp) over the same time range.
 	connRows, connErr := db.Query(`SELECT mac, connection, COUNT(*) as samples
 		FROM bandwidth_samples WHERE timestamp >= ? GROUP BY mac, connection`,
 		startTime.Format(time.RFC3339))
@@ -1032,6 +1090,10 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 }
 
 func runReportNetwork(period string, jsonOut bool) error {
+	if err := validatePeriod(period); err != nil {
+		return err
+	}
+
 	db, err := initDB()
 	if err != nil {
 		return err
@@ -1069,6 +1131,10 @@ func runReportNetwork(period string, jsonOut bool) error {
 }
 
 func runReportMesh(period string, jsonOut bool) error {
+	if err := validatePeriod(period); err != nil {
+		return err
+	}
+
 	db, err := initDB()
 	if err != nil {
 		return err
@@ -1283,7 +1349,17 @@ func runReboot(force bool) error {
 
 func runBlock(mac string) error {
 	if !validMAC(mac) {
-		return fmt.Errorf("invalid MAC address %q", mac)
+		// Try resolving as alias or device name
+		db, err := initDB()
+		if err != nil {
+			return fmt.Errorf("invalid MAC address %q (and cannot open DB to resolve name: %v)", mac, err)
+		}
+		defer db.Close()
+		resolved, err := resolveDeviceMAC(db, mac)
+		if err != nil {
+			return fmt.Errorf("invalid MAC address %q and could not resolve as device name", mac)
+		}
+		mac = resolved
 	}
 	mac = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(mac, ":", "-"), ".", "-"))
 
@@ -1303,7 +1379,17 @@ func runBlock(mac string) error {
 
 func runUnblock(mac string) error {
 	if !validMAC(mac) {
-		return fmt.Errorf("invalid MAC address %q", mac)
+		// Try resolving as alias or device name
+		db, err := initDB()
+		if err != nil {
+			return fmt.Errorf("invalid MAC address %q (and cannot open DB to resolve name: %v)", mac, err)
+		}
+		defer db.Close()
+		resolved, err := resolveDeviceMAC(db, mac)
+		if err != nil {
+			return fmt.Errorf("invalid MAC address %q and could not resolve as device name", mac)
+		}
+		mac = resolved
 	}
 	mac = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(mac, ":", "-"), ".", "-"))
 
@@ -1382,8 +1468,23 @@ func runAlias(remove bool, args []string) error {
 	return nil
 }
 
+// tagCache caches the parsed tags file to avoid re-reading on every call.
+var tagCache struct {
+	modTime time.Time
+	data    map[string][]string
+}
+
 func loadTags() map[string][]string {
-	data, err := os.ReadFile(cfgPath("deco_tags.json"))
+	path := cfgPath("deco_tags.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		return map[string][]string{}
+	}
+	if tagCache.data != nil && info.ModTime().Equal(tagCache.modTime) {
+		return tagCache.data
+	}
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return map[string][]string{}
 	}
@@ -1393,6 +1494,8 @@ func loadTags() map[string][]string {
 		logWarn("corrupt %s file, ignoring: %v", "deco_tags.json", err)
 		return map[string][]string{}
 	}
+	tagCache.modTime = info.ModTime()
+	tagCache.data = tags
 	return tags
 }
 
@@ -1416,6 +1519,9 @@ func saveTags(tags map[string][]string) error {
 	if err := os.WriteFile(cfgPath("deco_tags.json"), data, 0600); err != nil {
 		return fmt.Errorf("saving tags: %v", err)
 	}
+	// Invalidate tag cache so next loadTags picks up the change
+	tagCache.data = nil
+	tagCache.modTime = time.Time{}
 	return nil
 }
 
@@ -1506,8 +1612,23 @@ func runAliasTags() error {
 	return nil
 }
 
+// aliasCache caches the parsed aliases file to avoid re-reading on every call.
+var aliasCache struct {
+	modTime time.Time
+	data    map[string]string
+}
+
 func loadAliases() map[string]string {
-	data, err := os.ReadFile(cfgPath("deco_aliases.json"))
+	path := cfgPath("deco_aliases.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		return map[string]string{}
+	}
+	if aliasCache.data != nil && info.ModTime().Equal(aliasCache.modTime) {
+		return aliasCache.data
+	}
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return map[string]string{}
 	}
@@ -1517,6 +1638,8 @@ func loadAliases() map[string]string {
 		logWarn("corrupt %s file, ignoring: %v", "deco_aliases.json", err)
 		return map[string]string{}
 	}
+	aliasCache.modTime = info.ModTime()
+	aliasCache.data = aliases
 	return aliases
 }
 
@@ -1533,6 +1656,9 @@ func saveAliases(aliases map[string]string) error {
 	if err := os.WriteFile(cfgPath("deco_aliases.json"), data, 0600); err != nil {
 		return fmt.Errorf("saving aliases: %v", err)
 	}
+	// Invalidate alias cache so next loadAliases picks up the change
+	aliasCache.data = nil
+	aliasCache.modTime = time.Time{}
 	return nil
 }
 

@@ -112,9 +112,25 @@ func getDBSize() int64 {
 	return info.Size()
 }
 
+// dbSizeCheckThrottleSec controls how often checkDBSizeLimit re-stats the file.
+const dbSizeCheckThrottleSec = 60
+
+var (
+	lastDBSizeCheckTime time.Time
+	lastDBSizeCheckOK   bool
+	lastDBSizeCheckSize int64
+)
+
 func checkDBSizeLimit() (bool, int64) {
+	now := time.Now()
+	if !lastDBSizeCheckTime.IsZero() && now.Sub(lastDBSizeCheckTime).Seconds() < float64(dbSizeCheckThrottleSec) {
+		return lastDBSizeCheckOK, lastDBSizeCheckSize
+	}
 	size := getDBSize()
-	return size < DBSizeLimitBytes, size
+	lastDBSizeCheckTime = now
+	lastDBSizeCheckOK = size < DBSizeLimitBytes
+	lastDBSizeCheckSize = size
+	return lastDBSizeCheckOK, size
 }
 
 func checkDBCapacity(db *sql.DB) {
@@ -133,6 +149,8 @@ func checkDBCapacity(db *sql.DB) {
 
 func pruneOlderThan(db *sql.DB, days int) error {
 	cutoff := time.Now().AddDate(0, 0, -days).Format(time.RFC3339)
+	// Safety: table names are hardcoded string literals below, not user input,
+	// so direct concatenation into the query is safe from SQL injection.
 	tables := []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
 	for _, table := range tables {
 		if _, err := db.Exec("DELETE FROM "+table+" WHERE timestamp < ?", cutoff); err != nil {

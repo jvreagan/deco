@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,9 @@ import (
 
 	"github.com/chzyer/readline"
 )
+
+const defaultOllamaModel = "llama3.2"
+const defaultOllamaURL = "http://localhost:11434"
 
 type ollamaMessage struct {
 	Role    string `json:"role"`
@@ -67,7 +71,7 @@ func listOllamaModels(ollamaURL string) error {
 	}
 
 	if len(result.Models) == 0 {
-		fmt.Println("No models installed. Pull one with: ollama pull llama3.2")
+		fmt.Printf("No models installed. Pull one with: ollama pull %s\n", defaultOllamaModel)
 		return nil
 	}
 
@@ -149,7 +153,8 @@ const (
 
 // gatherNetworkContext builds a structured text prompt with live router data and/or DB history.
 // When compact is true, limits are tighter to fit smaller context windows.
-func gatherNetworkContext(compact bool) string {
+// If db is non-nil it is used for historical queries; otherwise the function opens its own connection.
+func gatherNetworkContext(compact bool, db ...*sql.DB) string {
 	bandwidthLimit := maxBandwidthDevices
 	knownLimit := maxKnownDevices
 	netSnapLimit := maxNetworkSnapshots
@@ -261,14 +266,24 @@ func gatherNetworkContext(compact bool) string {
 	}
 
 	// Historical data from DB
-	if db, err := initDB(); err == nil {
-		defer db.Close()
+	var histDB *sql.DB
+	var closeDB bool
+	if len(db) > 0 && db[0] != nil {
+		histDB = db[0]
+	} else if d, err := initDB(); err == nil {
+		histDB = d
+		closeDB = true
+	}
+	if histDB != nil {
+		if closeDB {
+			defer histDB.Close()
+		}
 		now := time.Now()
 		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		todayStr := startOfDay.Format(time.RFC3339)
 
 		// Top bandwidth today
-		if rows, err := db.Query(fmt.Sprintf(`
+		if rows, err := histDB.Query(fmt.Sprintf(`
 			SELECT mac, name,
 				SUM(download_kbps) as total_download,
 				SUM(upload_kbps) as total_upload
@@ -296,7 +311,7 @@ func gatherNetworkContext(compact bool) string {
 				}
 			}
 			if len(entries) > 0 {
-				interval := estimateInterval(db, startOfDay)
+				interval := estimateInterval(histDB, startOfDay)
 				sb.WriteString("\n=== TOP BANDWIDTH TODAY ===\n")
 				sb.WriteString(fmt.Sprintf("%-25s %-14s %-14s\n", "NAME", "DOWNLOAD", "UPLOAD"))
 				for _, e := range entries {
@@ -319,7 +334,7 @@ func gatherNetworkContext(compact bool) string {
 		}
 
 		// WAN IP history + performance (today)
-		if rows, err := db.Query(fmt.Sprintf(`
+		if rows, err := histDB.Query(fmt.Sprintf(`
 			SELECT timestamp, wan_ip,
 				COALESCE(cpu_percent, 0), COALESCE(mem_percent, 0)
 			FROM network_snapshots
@@ -374,7 +389,7 @@ func gatherNetworkContext(compact bool) string {
 		}
 
 		// Mesh node uptime (today)
-		if rows, err := db.Query(fmt.Sprintf(`
+		if rows, err := histDB.Query(fmt.Sprintf(`
 			SELECT name, role, mac, status, firmware
 			FROM mesh_snapshots
 			WHERE timestamp >= ?
@@ -416,7 +431,7 @@ func gatherNetworkContext(compact bool) string {
 		}
 
 		// All known MACs ever seen (for "have you seen device X?" type questions)
-		if rows, err := db.Query(fmt.Sprintf(`
+		if rows, err := histDB.Query(fmt.Sprintf(`
 			SELECT mac, name, MAX(timestamp) as last_seen, COUNT(*) as samples
 			FROM bandwidth_samples
 			GROUP BY mac
@@ -461,8 +476,10 @@ func gatherNetworkContext(compact bool) string {
 }
 
 // streamOllamaChat sends a chat request to Ollama and streams the response to w.
+// The provided context controls the lifetime of the request. A 5-minute timeout
+// is applied on top of the caller's context so streaming cannot hang forever.
 // Returns the full assembled response text.
-func streamOllamaChat(ollamaURL string, req ollamaChatRequest, w io.Writer) (string, error) {
+func streamOllamaChat(ctx context.Context, ollamaURL string, req ollamaChatRequest, w io.Writer) (string, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", fmt.Errorf("marshal request: %v", err)
@@ -470,7 +487,17 @@ func streamOllamaChat(ollamaURL string, req ollamaChatRequest, w io.Writer) (str
 
 	fmt.Fprint(os.Stderr, "Thinking...")
 
-	resp, err := http.Post(ollamaURL+"/api/chat", "application/json", strings.NewReader(string(body)))
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, ollamaURL+"/api/chat", strings.NewReader(string(body)))
+	if err != nil {
+		fmt.Fprint(os.Stderr, "\r            \r")
+		return "", fmt.Errorf("creating request: %v", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		fmt.Fprint(os.Stderr, "\r            \r")
 		return "", fmt.Errorf("ollama request failed: %v", err)
@@ -489,7 +516,7 @@ func streamOllamaChat(ollamaURL string, req ollamaChatRequest, w io.Writer) (str
 	for scanner.Scan() {
 		var chunk ollamaChatChunk
 		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
-			continue
+			return full.String(), fmt.Errorf("decoding stream chunk: %v", err)
 		}
 		if chunk.Message.Content != "" {
 			if firstToken {
@@ -516,7 +543,7 @@ func streamOllamaChat(ollamaURL string, req ollamaChatRequest, w io.Writer) (str
 // resolveOllamaURL returns the effective Ollama URL, preferring the OLLAMA_HOST
 // environment variable when the flag value is the default localhost URL.
 func resolveOllamaURL(flagURL string) string {
-	if flagURL == "http://localhost:11434" {
+	if flagURL == defaultOllamaURL {
 		if host := os.Getenv("OLLAMA_HOST"); host != "" {
 			return host
 		}
@@ -539,8 +566,14 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 	}
 	model = resolved
 
+	// Open DB once and reuse for context gathering (and refresh calls)
+	chatDB, _ := initDB()
+	if chatDB != nil {
+		defer chatDB.Close()
+	}
+
 	fmt.Fprint(os.Stderr, "Gathering network data... ")
-	systemPrompt := gatherNetworkContext(compact)
+	systemPrompt := gatherNetworkContext(compact, chatDB)
 	fmt.Fprintln(os.Stderr, "done.")
 
 	if showContext {
@@ -560,7 +593,7 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 			Messages: messages,
 			Stream:   true,
 		}
-		_, err := streamOllamaChat(ollamaURL, req, os.Stdout)
+		_, err := streamOllamaChat(context.Background(), ollamaURL, req, os.Stdout)
 		fmt.Println()
 		return err
 	}
@@ -570,7 +603,7 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 
 	// REPL mode — use readline for terminal, fall back to basic scanner for pipes/tests
 	if !isTerminal(os.Stdin) {
-		return runChatBasicREPL(ollamaURL, model, compact, messages, currentSnapshot)
+		return runChatBasicREPL(ollamaURL, model, compact, messages, currentSnapshot, chatDB)
 	}
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "you> ",
@@ -579,7 +612,7 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 		EOFPrompt:       "exit",
 	})
 	if err != nil {
-		return runChatBasicREPL(ollamaURL, model, compact, messages, currentSnapshot)
+		return runChatBasicREPL(ollamaURL, model, compact, messages, currentSnapshot, chatDB)
 	}
 	defer rl.Close()
 
@@ -603,7 +636,7 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 		if input == "refresh" {
 			fmt.Fprint(os.Stderr, "Refreshing network data... ")
 			oldSnapshot := currentSnapshot
-			systemPrompt = gatherNetworkContext(compact)
+			systemPrompt = gatherNetworkContext(compact, chatDB)
 			currentSnapshot = parseNetworkSnapshot(systemPrompt)
 			messages = []ollamaMessage{
 				{Role: "system", Content: systemPrompt},
@@ -631,7 +664,7 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 		}
 
 		fmt.Print("\nassistant> ")
-		response, err := streamOllamaChat(ollamaURL, req, os.Stdout)
+		response, err := streamOllamaChat(context.Background(), ollamaURL, req, os.Stdout)
 		fmt.Print("\n\n")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -645,7 +678,7 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 }
 
 // runChatBasicREPL is a fallback REPL when readline is unavailable (e.g., piped stdin in tests).
-func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMessage, currentSnapshot networkSnapshot) error {
+func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMessage, currentSnapshot networkSnapshot, chatDB *sql.DB) error {
 	fmt.Println("Network AI Chat (type 'exit' to quit, 'refresh' to reload, 'save' to export)")
 	fmt.Println()
 
@@ -666,7 +699,7 @@ func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMe
 		if input == "refresh" {
 			fmt.Fprint(os.Stderr, "Refreshing network data... ")
 			oldSnapshot := currentSnapshot
-			newPrompt := gatherNetworkContext(compact)
+			newPrompt := gatherNetworkContext(compact, chatDB)
 			currentSnapshot = parseNetworkSnapshot(newPrompt)
 			messages = []ollamaMessage{
 				{Role: "system", Content: newPrompt},
@@ -694,7 +727,7 @@ func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMe
 		}
 
 		fmt.Print("\nassistant> ")
-		response, err := streamOllamaChat(ollamaURL, req, os.Stdout)
+		response, err := streamOllamaChat(context.Background(), ollamaURL, req, os.Stdout)
 		fmt.Print("\n\n")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
