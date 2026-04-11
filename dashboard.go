@@ -216,6 +216,8 @@ func (m dashboardModel) View() string {
 }
 
 func (m dashboardModel) renderClients(width int) string {
+	// loadAliases is called on every render cycle, but uses file-based caching
+	// (aliasCache): it only re-reads the file when the mod time changes.
 	aliases := loadAliases()
 	var sb strings.Builder
 	sb.WriteString(headerStyle.Render("CLIENTS"))

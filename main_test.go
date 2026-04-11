@@ -294,9 +294,19 @@ func TestBackoff(t *testing.T) {
 
 // testEnv sets up an isolated config environment for a test.
 // It points XDG_CONFIG_HOME at a temp dir and re-derives dbPath.
-// Tests using testEnv must NOT use t.Parallel() (modifies global dbPath).
+//
+// LIMITATION: This function calls setDBPath which mutates the package-level
+// dbPath variable. Because of this (and other package-level state such as
+// the initDB schema-version cache), tests that call testEnv or setupTestDB
+// must NOT use t.Parallel(). Restructuring to pass a DB path through the
+// call chain would be the proper fix but is a large cross-cutting change.
+//
+// t.Cleanup restores the original dbPath so that tests run in sequence do
+// not leak state from one test into the next.
 func testEnv(t *testing.T) string {
 	t.Helper()
+	origDBPath := dbPath
+	t.Cleanup(func() { setDBPath(origDBPath) })
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	setDBPath(cfgPath("network_usage.db"))
@@ -304,6 +314,14 @@ func testEnv(t *testing.T) string {
 }
 
 // ==================== DATABASE SCHEMA TESTS ====================
+
+// TODO(#23): Many tests in this file capture stdout by reassigning os.Stdout
+// (e.g., `old := os.Stdout; os.Stdout = w; ... os.Stdout = old`). This is
+// fragile: it is not safe with t.Parallel(), panics can leak the reassignment,
+// and it couples tests to global state. The proper fix is to refactor the
+// production functions (runList, runReport, runPurge, etc.) to accept an
+// io.Writer parameter instead of writing directly to os.Stdout. That change
+// is large but would make the tests safer and more composable.
 
 func setupTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -316,6 +334,32 @@ func setupTestDB(t *testing.T) *sql.DB {
 	t.Cleanup(func() { db.Close() })
 
 	return db
+}
+
+func TestDBMigrationVersion(t *testing.T) {
+	db := setupTestDB(t)
+
+	version, err := getSchemaVersion(db)
+	if err != nil {
+		t.Fatalf("getSchemaVersion failed: %v", err)
+	}
+	if version != currentSchemaVersion {
+		t.Errorf("schema version = %d, want %d", version, currentSchemaVersion)
+	}
+}
+
+func TestDBMigrationIdempotent(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Running migrations again on an already-migrated DB should be a no-op
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("re-running migrations failed: %v", err)
+	}
+
+	version, _ := getSchemaVersion(db)
+	if version != currentSchemaVersion {
+		t.Errorf("schema version after re-migration = %d, want %d", version, currentSchemaVersion)
+	}
 }
 
 func TestDBSchemaTablesExist(t *testing.T) {
@@ -2092,7 +2136,7 @@ func TestRunStatusNoDB(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	runStatus()
+	runStatus(false)
 
 	w.Close()
 	os.Stdout = old
@@ -2119,7 +2163,7 @@ func TestRunStatusWithData(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	runStatus()
+	runStatus(false)
 
 	w.Close()
 	os.Stdout = old
@@ -3196,4 +3240,5 @@ func TestReportDeviceSubcommand(t *testing.T) {
 		t.Error("report cmd should have 'device' subcommand")
 	}
 }
+
 

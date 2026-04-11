@@ -619,6 +619,15 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 	fmt.Println("Network AI Chat (type 'exit' to quit, 'refresh' to reload, 'save' to export)")
 	fmt.Println()
 
+	state := &chatState{
+		messages:        messages,
+		currentSnapshot: currentSnapshot,
+		compact:         compact,
+		chatDB:          chatDB,
+		ollamaURL:       ollamaURL,
+		model:           model,
+	}
+
 	for {
 		input, err := rl.Readline()
 		if err != nil {
@@ -630,48 +639,14 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 		if input == "" {
 			continue
 		}
-		if input == "exit" || input == "quit" {
-			break
-		}
-		if input == "refresh" {
-			fmt.Fprint(os.Stderr, "Refreshing network data... ")
-			oldSnapshot := currentSnapshot
-			systemPrompt = gatherNetworkContext(compact, chatDB)
-			currentSnapshot = parseNetworkSnapshot(systemPrompt)
-			messages = []ollamaMessage{
-				{Role: "system", Content: systemPrompt},
-			}
-			fmt.Fprintln(os.Stderr, "done.")
-			fmt.Print(diffNetworkSnapshots(oldSnapshot, currentSnapshot))
-			continue
-		}
-		if input == "save" || strings.HasPrefix(input, "save ") {
-			path := strings.TrimPrefix(input, "save ")
-			if path == "save" {
-				path = ""
-			}
-			if err := saveConversation(messages, path); err != nil {
-				fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
-			}
-			continue
-		}
-
-		messages = append(messages, ollamaMessage{Role: "user", Content: input})
-		req := ollamaChatRequest{
-			Model:    model,
-			Messages: messages,
-			Stream:   true,
-		}
-
-		fmt.Print("\nassistant> ")
-		response, err := streamOllamaChat(context.Background(), ollamaURL, req, os.Stdout)
-		fmt.Print("\n\n")
+		shouldExit, err := processChatCommand(input, state)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			continue
 		}
-
-		messages = append(messages, ollamaMessage{Role: "assistant", Content: response})
+		if shouldExit {
+			break
+		}
 	}
 
 	return nil
@@ -681,6 +656,15 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMessage, currentSnapshot networkSnapshot, chatDB *sql.DB) error {
 	fmt.Println("Network AI Chat (type 'exit' to quit, 'refresh' to reload, 'save' to export)")
 	fmt.Println()
+
+	state := &chatState{
+		messages:        messages,
+		currentSnapshot: currentSnapshot,
+		compact:         compact,
+		chatDB:          chatDB,
+		ollamaURL:       ollamaURL,
+		model:           model,
+	}
 
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
@@ -693,51 +677,77 @@ func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMe
 		if input == "" {
 			continue
 		}
-		if input == "exit" || input == "quit" {
-			break
-		}
-		if input == "refresh" {
-			fmt.Fprint(os.Stderr, "Refreshing network data... ")
-			oldSnapshot := currentSnapshot
-			newPrompt := gatherNetworkContext(compact, chatDB)
-			currentSnapshot = parseNetworkSnapshot(newPrompt)
-			messages = []ollamaMessage{
-				{Role: "system", Content: newPrompt},
-			}
-			fmt.Fprintln(os.Stderr, "done.")
-			fmt.Print(diffNetworkSnapshots(oldSnapshot, currentSnapshot))
-			continue
-		}
-		if input == "save" || strings.HasPrefix(input, "save ") {
-			path := strings.TrimPrefix(input, "save ")
-			if path == "save" {
-				path = ""
-			}
-			if err := saveConversation(messages, path); err != nil {
-				fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
-			}
-			continue
-		}
-
-		messages = append(messages, ollamaMessage{Role: "user", Content: input})
-		req := ollamaChatRequest{
-			Model:    model,
-			Messages: messages,
-			Stream:   true,
-		}
-
-		fmt.Print("\nassistant> ")
-		response, err := streamOllamaChat(context.Background(), ollamaURL, req, os.Stdout)
-		fmt.Print("\n\n")
+		shouldExit, err := processChatCommand(input, state)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			continue
 		}
-
-		messages = append(messages, ollamaMessage{Role: "assistant", Content: response})
+		if shouldExit {
+			break
+		}
 	}
 
 	return nil
+}
+
+// chatState holds the mutable state shared across REPL iterations.
+// It is passed to processChatCommand so the readline and basic-scanner
+// REPL loops can share command-processing logic.
+type chatState struct {
+	messages        []ollamaMessage
+	currentSnapshot networkSnapshot
+	compact         bool
+	chatDB          *sql.DB
+	ollamaURL       string
+	model           string
+}
+
+// processChatCommand handles a single line of user input in the REPL.
+// It returns (shouldExit, error). When shouldExit is true the caller
+// should break out of the read loop.
+func processChatCommand(input string, state *chatState) (bool, error) {
+	if input == "exit" || input == "quit" {
+		return true, nil
+	}
+	if input == "refresh" {
+		fmt.Fprint(os.Stderr, "Refreshing network data... ")
+		oldSnapshot := state.currentSnapshot
+		newPrompt := gatherNetworkContext(state.compact, state.chatDB)
+		state.currentSnapshot = parseNetworkSnapshot(newPrompt)
+		state.messages = []ollamaMessage{
+			{Role: "system", Content: newPrompt},
+		}
+		fmt.Fprintln(os.Stderr, "done.")
+		fmt.Print(diffNetworkSnapshots(oldSnapshot, state.currentSnapshot))
+		return false, nil
+	}
+	if input == "save" || strings.HasPrefix(input, "save ") {
+		path := strings.TrimPrefix(input, "save ")
+		if path == "save" {
+			path = ""
+		}
+		if err := saveConversation(state.messages, path); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)
+		}
+		return false, nil
+	}
+
+	state.messages = append(state.messages, ollamaMessage{Role: "user", Content: input})
+	req := ollamaChatRequest{
+		Model:    state.model,
+		Messages: state.messages,
+		Stream:   true,
+	}
+
+	fmt.Print("\nassistant> ")
+	response, err := streamOllamaChat(context.Background(), state.ollamaURL, req, os.Stdout)
+	fmt.Print("\n\n")
+	if err != nil {
+		return false, err
+	}
+
+	state.messages = append(state.messages, ollamaMessage{Role: "assistant", Content: response})
+	return false, nil
 }
 
 // networkSnapshot holds a snapshot of connected devices for diffing on refresh.

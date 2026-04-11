@@ -270,13 +270,16 @@ Periods: today (default), hour, all`,
 }
 
 func statusCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show database statistics",
 		Run: func(cmd *cobra.Command, args []string) {
-			runStatus()
+			jsonOut, _ := cmd.Flags().GetBool("json")
+			runStatus(jsonOut)
 		},
 	}
+	cmd.Flags().BoolP("json", "j", false, "Output as JSON")
+	return cmd
 }
 
 func purgeCmd() *cobra.Command {

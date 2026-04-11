@@ -24,6 +24,7 @@ func validMAC(mac string) bool {
 }
 
 func printClientsTable(data *ClientList) {
+	// loadAliases uses file-based caching (aliasCache); safe to call frequently.
 	aliases := loadAliases()
 
 	fmt.Printf("\n%-25s %-16s %-18s %-14s %-12s %-8s %-8s\n",
@@ -118,6 +119,7 @@ func printMeshTable(data *MeshInfo) {
 }
 
 func printReport(report *Report) {
+	// loadAliases uses file-based caching (aliasCache); safe to call frequently.
 	aliases := loadAliases()
 
 	fmt.Println(strings.Repeat("=", 70))
@@ -184,6 +186,7 @@ func printReport(report *Report) {
 }
 
 func printReportCSV(report *Report) {
+	// loadAliases uses file-based caching (aliasCache); safe to call frequently.
 	aliases := loadAliases()
 	interval := int64(report.IntervalSeconds)
 

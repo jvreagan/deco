@@ -75,6 +75,9 @@ func runSetup() error {
 	return nil
 }
 
+// runVersion prints version info to stdout. It does not return error because
+// all operations are in-memory (no I/O beyond stdout), and there is nothing
+// the caller could recover from if printing fails.
 func runVersion() {
 	fmt.Println(version)
 	if bi, ok := debug.ReadBuildInfo(); ok {
@@ -464,6 +467,66 @@ func runPoll(interval int, maxFailures int) error {
 	})
 }
 
+// storeBandwidthSamples inserts bandwidth samples for all connected clients into the database.
+func storeBandwidthSamples(db *sql.DB, clients *ClientList, ts string) {
+	timestamp := ts
+	logTS := time.Now().Format("15:04:05")
+	for _, c := range clients.Clients {
+		if _, err := db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			timestamp, c.MAC, c.Name, c.IP, c.Connection, c.Type, c.DownloadKbps, c.UploadKbps); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] DB error (bandwidth): %v\n", logTS, err)
+		}
+	}
+}
+
+// storeNetworkSnapshot inserts a network snapshot (WAN, LAN, performance) into the database.
+func storeNetworkSnapshot(db *sql.DB, network *NetworkInfo, ts string) {
+	logTS := time.Now().Format("15:04:05")
+	var dns1, dns2 string
+	if len(network.WAN.DNS) >= 2 {
+		dns1 = network.WAN.DNS[0]
+		dns2 = network.WAN.DNS[1]
+	}
+	if _, err := db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ts, network.WAN.IP, network.WAN.Gateway, dns1, dns2, network.LAN.IP, network.LAN.Netmask, network.Performance.CPUPercent, network.Performance.MemPercent); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] DB error (network): %v\n", logTS, err)
+	}
+}
+
+// storeMeshSnapshot inserts mesh node snapshots into the database.
+func storeMeshSnapshot(db *sql.DB, mesh *MeshInfo, ts string) {
+	logTS := time.Now().Format("15:04:05")
+	for _, d := range mesh.Devices {
+		if _, err := db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			ts, d.Name, d.Role, d.IP, d.MAC, d.Model, d.Firmware, d.Status); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] DB error (mesh): %v\n", logTS, err)
+		}
+	}
+}
+
+// storeWirelessSnapshot inserts wireless band snapshots into the database.
+func storeWirelessSnapshot(db *sql.DB, wireless *WirelessInfo, ts string) {
+	logTS := time.Now().Format("15:04:05")
+	for bandName, band := range wireless.Bands {
+		hostEnabled := 0
+		if band.Host.Enabled {
+			hostEnabled = 1
+		}
+		guestEnabled := 0
+		if band.Guest.Enabled {
+			guestEnabled = 1
+		}
+		if _, err := db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			ts, bandName, band.Host.SSID, band.Host.Channel, band.Host.ChannelWidth, hostEnabled, guestEnabled, band.Guest.SSID); err != nil {
+			fmt.Fprintf(os.Stderr, "[%s] DB error (wireless): %v\n", logTS, err)
+		}
+	}
+}
+
 func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string, maxFailures int) error {
 	var knownMACs map[string]bool
 	var aliases map[string]string
@@ -507,12 +570,8 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 			clientCount := 0
 			if clientErr == nil {
 				clientCount = len(clientData.Clients)
+				storeBandwidthSamples(db, clientData, timestamp)
 				for _, c := range clientData.Clients {
-					if _, err := db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-						timestamp, c.MAC, c.Name, c.IP, c.Connection, c.Type, c.DownloadKbps, c.UploadKbps); err != nil {
-						fmt.Fprintf(os.Stderr, "[%s] DB error (bandwidth): %v\n", ts, err)
-					}
 					if notify && knownMACs != nil {
 						macUpper := strings.ToUpper(c.MAC)
 						if !knownMACs[macUpper] {
@@ -546,18 +605,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 			if networkErr == nil {
 				cpuPct = networkData.Performance.CPUPercent
 				memPct = networkData.Performance.MemPercent
-
-				var dns1, dns2 string
-				if len(networkData.WAN.DNS) >= 2 {
-					dns1 = networkData.WAN.DNS[0]
-					dns2 = networkData.WAN.DNS[1]
-				}
-
-				if _, err := db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					timestamp, networkData.WAN.IP, networkData.WAN.Gateway, dns1, dns2, networkData.LAN.IP, networkData.LAN.Netmask, cpuPct, memPct); err != nil {
-					fmt.Fprintf(os.Stderr, "[%s] DB error (network): %v\n", ts, err)
-				}
+				storeNetworkSnapshot(db, networkData, timestamp)
 			} else {
 				fmt.Printf("[%s] Error getting network: %v\n", ts, networkErr)
 			}
@@ -565,34 +613,13 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 			meshCount := 0
 			if meshErr == nil {
 				meshCount = len(meshData.Devices)
-				for _, d := range meshData.Devices {
-					if _, err := db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-						timestamp, d.Name, d.Role, d.IP, d.MAC, d.Model, d.Firmware, d.Status); err != nil {
-						fmt.Fprintf(os.Stderr, "[%s] DB error (mesh): %v\n", ts, err)
-					}
-				}
+				storeMeshSnapshot(db, meshData, timestamp)
 			} else {
 				fmt.Printf("[%s] Error getting mesh: %v\n", ts, meshErr)
 			}
 
 			if wirelessErr == nil {
-				for bandName, band := range wirelessData.Bands {
-					hostEnabled := 0
-					if band.Host.Enabled {
-						hostEnabled = 1
-					}
-					guestEnabled := 0
-					if band.Guest.Enabled {
-						guestEnabled = 1
-					}
-
-					if _, err := db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
-						VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-						timestamp, bandName, band.Host.SSID, band.Host.Channel, band.Host.ChannelWidth, hostEnabled, guestEnabled, band.Guest.SSID); err != nil {
-						fmt.Fprintf(os.Stderr, "[%s] DB error (wireless): %v\n", ts, err)
-					}
-				}
+				storeWirelessSnapshot(db, wirelessData, timestamp)
 			} else {
 				fmt.Printf("[%s] Error getting wireless: %v\n", ts, wirelessErr)
 			}
@@ -631,6 +658,9 @@ func loadKnownMACs(db *sql.DB) map[string]bool {
 
 var webhookClient = &http.Client{Timeout: 10 * time.Second}
 
+// sendWebhook is fire-and-forget: it logs warnings on failure rather than
+// returning an error, because webhook delivery should never abort the caller's
+// main operation (monitoring, alerting, etc.). This is intentional.
 func sendWebhook(webhookURL string, payload WebhookPayload) {
 	if webhookURL == "" {
 		return
@@ -657,6 +687,8 @@ func sendWebhook(webhookURL string, payload WebhookPayload) {
 	}
 }
 
+// notifyNewMAC is best-effort: it logs and sends notifications but does not
+// return error, since notification failure should not interrupt the monitor loop.
 func notifyNewMAC(mac, name, ip, webhookURL string) {
 	msg := fmt.Sprintf("NEW DEVICE: %s (%s) at %s", name, mac, ip)
 	logInfo("%s", msg)
@@ -1170,7 +1202,19 @@ func runReportMesh(period string, jsonOut bool) error {
 	return nil
 }
 
-func runStatus() {
+// statusInfo holds database statistics for JSON output.
+type statusInfo struct {
+	Database      string `json:"database"`
+	SizeBytes     int64  `json:"size_bytes"`
+	SizeMB        string `json:"size_mb"`
+	LimitGB       string `json:"limit_gb"`
+	TotalSamples  int64  `json:"total_samples"`
+	UniqueDevices int64  `json:"unique_devices"`
+	FirstSample   string `json:"first_sample"`
+	LastSample    string `json:"last_sample"`
+}
+
+func runStatus(jsonOut bool) {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		fmt.Println("No database found. Run 'poll' first to collect data.")
 		return
@@ -1197,6 +1241,20 @@ func runStatus() {
 	}
 
 	size := getDBSize()
+
+	if jsonOut {
+		printJSON(statusInfo{
+			Database:      dbPath,
+			SizeBytes:     size,
+			SizeMB:        fmt.Sprintf("%.2f", float64(size)/(1024*1024)),
+			LimitGB:       fmt.Sprintf("%.0f", float64(DBSizeLimitBytes)/(1024*1024*1024)),
+			TotalSamples:  totalSamples,
+			UniqueDevices: uniqueDevices,
+			FirstSample:   firstSample.String,
+			LastSample:    lastSample.String,
+		})
+		return
+	}
 
 	fmt.Printf("\nDatabase: %s\n", dbPath)
 	fmt.Printf("Size: %.2f MB / %.0f GB limit\n", float64(size)/(1024*1024), float64(DBSizeLimitBytes)/(1024*1024*1024))
@@ -1664,6 +1722,7 @@ func saveAliases(aliases map[string]string) error {
 
 func filterClients(data *ClientList, nameFilter, macFilter string) *ClientList {
 	var filtered []ClientInfo
+	// loadAliases uses file-based caching (aliasCache); safe to call on each render cycle.
 	aliases := loadAliases()
 
 	for _, c := range data.Clients {

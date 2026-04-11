@@ -32,6 +32,10 @@ type Config struct {
 // The Deco router firmware typically expires sessions after 5 minutes.
 const sessionTimeout = 5 * time.Minute
 
+// minRequestInterval is the minimum time between consecutive API requests
+// to avoid hammering the router. See issue #39.
+const minRequestInterval = 100 * time.Millisecond
+
 // DecoClient is not safe for concurrent use. Create separate instances for concurrent operations.
 type DecoClient struct {
 	host         string
@@ -41,6 +45,7 @@ type DecoClient struct {
 	sysauth      string
 	logged       bool
 	lastAuthTime time.Time
+	lastRequest  time.Time // tracks last API call for rate limiting
 
 	// Encryption
 	aesKey []byte
@@ -356,6 +361,15 @@ func (dc *DecoClient) Authorize() error {
 }
 
 func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
+	// Rate limit: ensure at least minRequestInterval between consecutive requests
+	// to prevent hammering the router (issue #39).
+	if !dc.lastRequest.IsZero() {
+		if elapsed := time.Since(dc.lastRequest); elapsed < minRequestInterval {
+			time.Sleep(minRequestInterval - elapsed)
+		}
+	}
+	dc.lastRequest = time.Now()
+
 	start := time.Now()
 	logDebug("POST %s", path)
 
