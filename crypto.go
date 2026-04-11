@@ -12,17 +12,21 @@ import (
 	"strings"
 )
 
-func generateAESKeyIV() ([]byte, []byte) {
+func generateAESKeyIV() ([]byte, []byte, error) {
 	// Generate random 16-byte hex strings (like Python library)
 	keyBytes := make([]byte, 8)
 	ivBytes := make([]byte, 8)
-	rand.Read(keyBytes)
-	rand.Read(ivBytes)
+	if _, err := rand.Read(keyBytes); err != nil {
+		return nil, nil, fmt.Errorf("failed to generate AES key: %v", err)
+	}
+	if _, err := rand.Read(ivBytes); err != nil {
+		return nil, nil, fmt.Errorf("failed to generate AES IV: %v", err)
+	}
 
 	key := []byte(hex.EncodeToString(keyBytes))
 	iv := []byte(hex.EncodeToString(ivBytes))
 
-	return key, iv
+	return key, iv, nil
 }
 
 func pkcs7Pad(data []byte, blockSize int) []byte {
@@ -37,8 +41,14 @@ func pkcs7Unpad(data []byte) []byte {
 		return data
 	}
 	padding := int(data[length-1])
-	if padding > length || padding > aes.BlockSize {
+	if padding == 0 || padding > length || padding > aes.BlockSize {
 		return data
+	}
+	// Validate all padding bytes are identical
+	for i := length - padding; i < length; i++ {
+		if data[i] != byte(padding) {
+			return data
+		}
 	}
 	return data[:length-padding]
 }
@@ -95,11 +105,20 @@ func rsaEncryptPKCS1(data []byte, n *big.Int, e int) ([]byte, error) {
 
 	// Fill with random non-zero bytes
 	psLen := modSize - len(data) - 3
-	for i := 0; i < psLen; {
-		b := make([]byte, 1)
-		rand.Read(b)
-		if b[0] != 0 {
-			padded[2+i] = b[0]
+	buf := make([]byte, psLen*2)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, fmt.Errorf("failed to generate RSA padding: %v", err)
+	}
+	for i, j := 0, 0; i < psLen; j++ {
+		if j >= len(buf) {
+			// Extremely unlikely: refill if we filtered too many zeroes
+			if _, err := rand.Read(buf); err != nil {
+				return nil, fmt.Errorf("failed to generate RSA padding: %v", err)
+			}
+			j = 0
+		}
+		if buf[j] != 0 {
+			padded[2+i] = buf[j]
 			i++
 		}
 	}

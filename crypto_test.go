@@ -8,7 +8,10 @@ import (
 )
 
 func TestGenerateAESKeyIV(t *testing.T) {
-	key, iv := generateAESKeyIV()
+	key, iv, err := generateAESKeyIV()
+	if err != nil {
+		t.Fatalf("generateAESKeyIV failed: %v", err)
+	}
 
 	if len(key) != 16 {
 		t.Errorf("key length = %d, want 16", len(key))
@@ -26,7 +29,10 @@ func TestGenerateAESKeyIV(t *testing.T) {
 	}
 
 	// Verify uniqueness
-	key2, iv2 := generateAESKeyIV()
+	key2, iv2, err := generateAESKeyIV()
+	if err != nil {
+		t.Fatalf("generateAESKeyIV (2nd call) failed: %v", err)
+	}
 	if string(key) == string(key2) {
 		t.Error("two generated keys should not be identical")
 	}
@@ -72,7 +78,7 @@ func TestPKCS7PadUnpad(t *testing.T) {
 }
 
 func TestAESEncryptDecrypt(t *testing.T) {
-	key, iv := generateAESKeyIV()
+	key, iv, _ := generateAESKeyIV()
 	plaintext := []byte("Hello, this is a test message for AES encryption!")
 
 	encrypted, err := aesEncrypt(plaintext, key, iv)
@@ -95,7 +101,7 @@ func TestAESEncryptDecrypt(t *testing.T) {
 }
 
 func TestAESDecryptInvalidInput(t *testing.T) {
-	key, iv := generateAESKeyIV()
+	key, iv, _ := generateAESKeyIV()
 
 	t.Run("non-base64", func(t *testing.T) {
 		_, err := aesDecrypt("not-valid-base64!!!", key, iv)

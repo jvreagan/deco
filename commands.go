@@ -134,6 +134,10 @@ type pollLoopConfig struct {
 // pollLoop runs a polling loop with shared infrastructure: config loading,
 // signal handling, client creation, auth with backoff, and DB management.
 func pollLoop(cfg pollLoopConfig) error {
+	if cfg.interval < 1 {
+		return fmt.Errorf("interval must be at least 1 second, got %d", cfg.interval)
+	}
+
 	var config *Config
 	if cfg.configOverride != nil {
 		config = cfg.configOverride
@@ -634,8 +638,9 @@ func notifyNewMAC(mac, name, ip, webhookURL string) {
 	logInfo("%s", msg)
 
 	// macOS desktop notification (best-effort)
-	cmd := exec.Command("osascript", "-e",
-		fmt.Sprintf(`display notification "%s" with title "Deco: New Device"`, msg))
+	// Use -e with separate statements to avoid shell injection via device names.
+	script := fmt.Sprintf(`display notification %q with title "Deco: New Device"`, msg)
+	cmd := exec.Command("osascript", "-e", script)
 	cmd.Run()
 
 	sendWebhook(webhookURL, WebhookPayload{

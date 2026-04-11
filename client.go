@@ -105,7 +105,12 @@ func NewDecoClient(host, password string) *DecoClient {
 		signE:    0x10001,
 	}
 
-	dc.aesKey, dc.aesIV = generateAESKeyIV()
+	var err error
+	dc.aesKey, dc.aesIV, err = generateAESKeyIV()
+	if err != nil {
+		// Crypto randomness failure is unrecoverable
+		panic(err)
+	}
 	return dc
 }
 
@@ -125,7 +130,11 @@ func (dc *DecoClient) EnsureAuthorized() error {
 	// Reset HTTP client to clear stale cookies
 	jar, _ := cookiejar.New(nil) // cookiejar.New never returns an error with nil options
 	dc.client.Jar = jar
-	dc.aesKey, dc.aesIV = generateAESKeyIV()
+	var err error
+	dc.aesKey, dc.aesIV, err = generateAESKeyIV()
+	if err != nil {
+		return fmt.Errorf("failed to generate encryption keys: %v", err)
+	}
 	return dc.Authorize()
 }
 

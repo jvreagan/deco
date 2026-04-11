@@ -34,6 +34,12 @@ func initDB() (*sql.DB, error) {
 		return nil, err
 	}
 
+	// Enable WAL mode for better concurrent read/write performance
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to enable WAL mode: %v", err)
+	}
+
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS bandwidth_samples (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
