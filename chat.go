@@ -158,7 +158,7 @@ const (
 // gatherNetworkContext builds a structured text prompt with live router data and/or DB history.
 // When compact is true, limits are tighter to fit smaller context windows.
 // If db is non-nil it is used for historical queries; otherwise the function opens its own connection.
-func gatherNetworkContext(compact bool, db *sql.DB) string {
+func gatherNetworkContext(compact bool, db *sql.DB) (string, networkSnapshot) {
 	bandwidthLimit := maxBandwidthDevices
 	knownLimit := maxKnownDevices
 	netSnapLimit := maxNetworkSnapshots
@@ -176,6 +176,9 @@ func gatherNetworkContext(compact bool, db *sql.DB) string {
 
 	aliases := loadAliases()
 
+	// Build snapshot from structured data (not text parsing)
+	snap := networkSnapshot{DeviceMACs: make(map[string]string)}
+
 	// Try live router data
 	liveOK := false
 	client, _, err := connectClient()
@@ -185,6 +188,7 @@ func gatherNetworkContext(compact bool, db *sql.DB) string {
 
 		// Clients
 		if clients, err := client.GetClients(); err == nil && clients != nil {
+			snap.DeviceCount = clients.Count
 			sb.WriteString(fmt.Sprintf("\n=== CONNECTED DEVICES (%d) ===\n", clients.Count))
 			sb.WriteString(fmt.Sprintf("%-25s %-16s %-18s %-14s %-10s %-10s\n",
 				"NAME", "IP", "MAC", "CONNECTION", "DOWN", "UP"))
@@ -193,6 +197,7 @@ func gatherNetworkContext(compact bool, db *sql.DB) string {
 				if alias, ok := aliases[strings.ToUpper(c.MAC)]; ok {
 					name = alias
 				}
+				snap.DeviceMACs[strings.ToUpper(c.MAC)] = name
 				if len(name) > 24 {
 					name = name[:24]
 				}
@@ -211,6 +216,7 @@ func gatherNetworkContext(compact bool, db *sql.DB) string {
 
 		// Network
 		if net, err := client.GetNetwork(); err == nil && net != nil {
+			snap.WANIP = net.WAN.IP
 			sb.WriteString("\n=== NETWORK ===\n")
 			sb.WriteString(fmt.Sprintf("WAN IP: %s | Gateway: %s", net.WAN.IP, net.WAN.Gateway))
 			if net.Performance.CPUPercent != nil {
@@ -292,7 +298,7 @@ func gatherNetworkContext(compact bool, db *sql.DB) string {
 		appendKnownDevices(&sb, histDB, aliases, knownLimit)
 	}
 
-	return sb.String()
+	return sb.String(), snap
 }
 
 // appendBandwidthHistory adds the "TOP BANDWIDTH TODAY" section to the context.
@@ -620,7 +626,7 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 	}
 
 	fmt.Fprint(os.Stderr, "Gathering network data... ")
-	systemPrompt := gatherNetworkContext(compact, chatDB)
+	systemPrompt, currentSnapshot := gatherNetworkContext(compact, chatDB)
 	fmt.Fprintln(os.Stderr, "done.")
 
 	if showContext {
@@ -644,9 +650,6 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 		fmt.Println()
 		return err
 	}
-
-	// Track current snapshot for refresh diff
-	currentSnapshot := parseNetworkSnapshot(systemPrompt)
 
 	// REPL mode — use readline for terminal, fall back to basic scanner for pipes/tests
 	if !isTerminal(os.Stdin) {
@@ -759,8 +762,8 @@ func processChatCommand(input string, state *chatState) (bool, error) {
 	if input == "refresh" {
 		fmt.Fprint(os.Stderr, "Refreshing network data... ")
 		oldSnapshot := state.currentSnapshot
-		newPrompt := gatherNetworkContext(state.compact, state.chatDB)
-		state.currentSnapshot = parseNetworkSnapshot(newPrompt)
+		newPrompt, newSnapshot := gatherNetworkContext(state.compact, state.chatDB)
+		state.currentSnapshot = newSnapshot
 		state.messages = []ollamaMessage{
 			{Role: "system", Content: newPrompt},
 		}

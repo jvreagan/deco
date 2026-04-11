@@ -196,6 +196,7 @@ func TestLogLevels(t *testing.T) {
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = oldStderr })
 
 	// At default level (Warn), debug should be hidden
 	logLevel.Store(int32(LevelWarn))
@@ -219,6 +220,7 @@ func TestLogLevels(t *testing.T) {
 	// At debug level, debug should be visible
 	r2, w2, _ := os.Pipe()
 	os.Stderr = w2
+	t.Cleanup(func() { os.Stderr = oldStderr })
 
 	logLevel.Store(int32(LevelDebug))
 	logDebug("now visible")
@@ -242,6 +244,7 @@ func TestCobraRootHelp(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	rootCmd.SetArgs([]string{"--help"})
 	rootCmd.Execute()
@@ -645,6 +648,7 @@ func TestPrintClientsTable(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	printClientsTable(data)
 
@@ -681,6 +685,7 @@ func TestPrintNetworkTable(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	printNetworkTable(data)
 
@@ -715,6 +720,7 @@ func TestPrintNetworkTable(t *testing.T) {
 
 	r2, w2, _ := os.Pipe()
 	os.Stdout = w2
+	t.Cleanup(func() { os.Stdout = old })
 
 	printNetworkTable(dataNil)
 
@@ -742,6 +748,7 @@ func TestPrintMeshTable(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	printMeshTable(data)
 
@@ -775,6 +782,7 @@ func TestPrintReport(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	printReport(report)
 
@@ -800,6 +808,7 @@ func TestPrintReport(t *testing.T) {
 
 	r2, w2, _ := os.Pipe()
 	os.Stdout = w2
+	t.Cleanup(func() { os.Stdout = old })
 
 	printReport(emptyReport)
 
@@ -828,6 +837,7 @@ func TestPrintWirelessTableDeterministic(t *testing.T) {
 		old := os.Stdout
 		r, w, _ := os.Pipe()
 		os.Stdout = w
+		t.Cleanup(func() { os.Stdout = old })
 		printWirelessTable(data)
 		w.Close()
 		os.Stdout = old
@@ -1032,15 +1042,26 @@ func TestParsePeriod(t *testing.T) {
 	tests := []struct {
 		input    string
 		wantName string
+		wantErr  bool
 	}{
-		{"today", "Today"},
-		{"hour", "Last hour"},
-		{"all", "All time"},
-		{"", "All time"},
+		{"today", "Today", false},
+		{"hour", "Last hour", false},
+		{"all", "All time", false},
+		{"", "", true},
+		{"bogus", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			startTime, name := parsePeriod(tt.input)
+			startTime, name, err := parsePeriod(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parsePeriod(%q) expected error, got nil", tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsePeriod(%q) unexpected error: %v", tt.input, err)
+			}
 			if name != tt.wantName {
 				t.Errorf("parsePeriod(%q) name = %q, want %q", tt.input, name, tt.wantName)
 			}
@@ -1056,7 +1077,7 @@ func TestParsePeriod(t *testing.T) {
 					t.Errorf("parsePeriod(\"hour\") startTime should be ~1 hour ago, got %v", startTime)
 				}
 			}
-			if tt.input == "all" || tt.input == "" {
+			if tt.input == "all" {
 				if !startTime.IsZero() {
 					t.Errorf("parsePeriod(%q) startTime should be zero, got %v", tt.input, startTime)
 				}
@@ -1284,6 +1305,7 @@ func TestRunReportMeshQuery(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	printMeshReport(entries, "All time")
 
@@ -1312,6 +1334,7 @@ func TestPrintNetworkReportEmpty(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	printNetworkReport(nil, "Today")
 
@@ -1334,6 +1357,7 @@ func TestReportSubcommands(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	rootCmd.SetArgs([]string{"report", "--help"})
 	rootCmd.Execute()
@@ -1357,6 +1381,7 @@ func TestMonitorNotifyFlag(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	rootCmd.SetArgs([]string{"monitor", "--help"})
 	rootCmd.Execute()
@@ -1524,6 +1549,7 @@ func TestCompletionCmd(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	// Read pipe concurrently to avoid deadlock when output exceeds pipe buffer
 	var buf bytes.Buffer
@@ -1658,6 +1684,9 @@ func TestReportConnectionBreakdown(t *testing.T) {
 func TestEstimateInterval(t *testing.T) {
 	db := setupTestDB(t)
 
+	// Reset cache before test
+	cachedInterval.set = false
+
 	// No data → fallback to 5
 	got := estimateInterval(db, time.Time{})
 	if got != 5 {
@@ -1672,6 +1701,9 @@ func TestEstimateInterval(t *testing.T) {
 			VALUES (?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
 	}
 
+	// Reset cache to force re-computation with new data
+	cachedInterval.set = false
+
 	got = estimateInterval(db, time.Time{})
 	if got != 60 {
 		t.Errorf("60s intervals: estimateInterval = %d, want 60", got)
@@ -1680,6 +1712,9 @@ func TestEstimateInterval(t *testing.T) {
 
 func TestEstimateIntervalSingleSample(t *testing.T) {
 	db := setupTestDB(t)
+
+	// Reset cache before test
+	cachedInterval.set = false
 
 	ts := time.Now().Format(time.RFC3339)
 	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
@@ -1709,6 +1744,7 @@ func TestRunReportEndToEnd(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReport("today", false, false, "", "", "")
 
@@ -1745,6 +1781,7 @@ func TestRunReportJSON(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReport("today", true, false, "", "", "")
 
@@ -1779,6 +1816,7 @@ func TestRunReportWithNameFilter(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReport("today", false, false, "phone", "", "")
 
@@ -1813,6 +1851,7 @@ func TestRunReportWithMACFilter(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReport("today", false, false, "", "AA-BB-CC-DD-EE-FF", "")
 
@@ -1841,6 +1880,7 @@ func TestRunReportEmpty(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReport("today", false, false, "", "", "")
 
@@ -1872,6 +1912,7 @@ func TestRunReportNetworkEndToEnd(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReportNetwork("today", false)
 
@@ -1904,6 +1945,7 @@ func TestRunReportNetworkJSON(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReportNetwork("today", true)
 
@@ -1933,6 +1975,7 @@ func TestRunReportMeshEndToEnd(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReportMesh("today", false)
 
@@ -1965,6 +2008,7 @@ func TestRunReportMeshJSON(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReportMesh("today", true)
 
@@ -1992,6 +2036,7 @@ func TestRunAliasListEmpty(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runAlias(false, []string{})
 
@@ -2023,6 +2068,7 @@ func TestRunAliasSetAndList(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err = runAlias(false, []string{})
 
@@ -2137,6 +2183,7 @@ func TestRunStatusNoDB(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	if err := runStatus(false); err != nil {
 		t.Fatalf("runStatus failed: %v", err)
@@ -2166,6 +2213,7 @@ func TestRunStatusWithData(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	if err := runStatus(false); err != nil {
 		t.Fatalf("runStatus failed: %v", err)
@@ -2197,6 +2245,7 @@ func TestRunPurgeNoDB(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	if err := runPurge(true, "", 0); err != nil {
 		t.Fatalf("runPurge failed: %v", err)
@@ -2225,6 +2274,7 @@ func TestRunPurgeForceAll(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	if err := runPurge(true, "", 0); err != nil {
 		t.Fatalf("runPurge failed: %v", err)
@@ -2263,6 +2313,7 @@ func TestRunPurgeByDays(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	if err := runPurge(true, "", 7); err != nil {
 		w.Close()
@@ -2304,6 +2355,7 @@ func TestRunPurgeByBefore(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	if err := runPurge(true, beforeDate, 0); err != nil {
 		w.Close()
@@ -2338,6 +2390,54 @@ func TestRunPurgeInvalidDate(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid date") {
 		t.Errorf("error should mention 'invalid date', got: %v", err)
+	}
+}
+
+func TestRunPurgeDays(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Insert records at three dates: 30 days ago, 10 days ago, and today
+	ts30 := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
+	ts10 := time.Now().AddDate(0, 0, -10).Format(time.RFC3339)
+	tsNow := time.Now().Format(time.RFC3339)
+
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, ts30, "AA-BB-CC-DD-EE-FF", "Dev30", 100, 50)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, ts10, "AA-BB-CC-DD-EE-FF", "Dev10", 200, 100)
+	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
+		VALUES (?, ?, ?, ?, ?)`, tsNow, "AA-BB-CC-DD-EE-FF", "DevNow", 300, 150)
+
+	// Purge records older than 15 days (should only delete the 30-day-old record)
+	if err := runPurge(true, "", 15); err != nil {
+		t.Fatalf("runPurge(true, \"\", 15) failed: %v", err)
+	}
+
+	// Verify only the 30-day-old record was deleted
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&count)
+	if count != 2 {
+		t.Fatalf("expected 2 records remaining after purge, got %d", count)
+	}
+
+	// Verify the remaining records are the 10-day and today records
+	rows, err := db.Query("SELECT name FROM bandwidth_samples ORDER BY timestamp")
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		names = append(names, name)
+	}
+
+	if len(names) != 2 || names[0] != "Dev10" || names[1] != "DevNow" {
+		t.Errorf("expected [Dev10 DevNow], got %v", names)
 	}
 }
 
@@ -2395,6 +2495,7 @@ func TestPrintJSON(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	printJSON(map[string]string{"key": "value"})
 
@@ -2416,6 +2517,7 @@ func TestPrintDBLimitError(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	printDBLimitError(300*1024*1024*1024, "Poll")
 
@@ -2440,6 +2542,7 @@ func TestRunVersion(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	runVersion()
 
@@ -2461,6 +2564,7 @@ func TestCompletionSubcommand(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	rootCmd.SetArgs([]string{"--help"})
 	rootCmd.Execute()
@@ -2587,6 +2691,7 @@ func TestLogError(t *testing.T) {
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = oldStderr })
 
 	logLevel.Store(int32(LevelError))
 	logError("test error message")
@@ -2645,6 +2750,7 @@ func TestPrintNetworkReportWithIPChanges(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	printNetworkReport(entries, "Today")
 
@@ -2707,6 +2813,7 @@ func TestPrintReportCSV(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	printReportCSV(report)
 
@@ -2756,6 +2863,7 @@ func TestRunReportCSV(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err = runReport("today", false, true, "", "", "")
 
@@ -2894,6 +3002,7 @@ func TestRunAliasTags(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runAliasTags()
 
@@ -2945,6 +3054,7 @@ func TestRunReportWithGroup(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err = runReport("today", false, false, "", "", "gaming")
 
@@ -3137,6 +3247,7 @@ func TestRunReportDevice(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReportDevice("AA-BB-CC-DD-EE-FF", "today", false, false)
 
@@ -3172,6 +3283,7 @@ func TestRunReportDeviceJSON(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReportDevice("AA-BB-CC-DD-EE-FF", "today", true, false)
 
@@ -3213,6 +3325,7 @@ func TestRunReportDeviceCSV(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
 
 	err := runReportDevice("AA-BB-CC-DD-EE-FF", "today", false, true)
 

@@ -7,7 +7,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -466,7 +468,7 @@ func runPoll(interval int, maxFailures int) error {
 				totalUp += int64(c.UploadKbps)
 			}
 
-			fmt.Printf("[%s] Sample #%d: %d clients, %d active, %d KB/s down %d KB/s up\n",
+			logInfo("[%s] Sample #%d: %d clients, %d active, %d KB/s down %d KB/s up",
 				time.Now().Format("15:04:05"), cycle+1, len(data.Clients), activeCount, totalDown, totalUp)
 			return nil
 		},
@@ -481,7 +483,7 @@ func storeBandwidthSamples(db *sql.DB, clients *ClientList, ts string) {
 		if _, err := db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			timestamp, c.MAC, c.Name, c.IP, c.Connection, c.Type, c.DownloadKbps, c.UploadKbps); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] DB error (bandwidth): %v\n", logTS, err)
+			logWarn("[%s] DB error (bandwidth): %v", logTS, err)
 		}
 	}
 }
@@ -497,7 +499,7 @@ func storeNetworkSnapshot(db *sql.DB, network *NetworkInfo, ts string) {
 	if _, err := db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, network.WAN.IP, network.WAN.Gateway, dns1, dns2, network.LAN.IP, network.LAN.Netmask, network.Performance.CPUPercent, network.Performance.MemPercent); err != nil {
-		fmt.Fprintf(os.Stderr, "[%s] DB error (network): %v\n", logTS, err)
+		logWarn("[%s] DB error (network): %v", logTS, err)
 	}
 }
 
@@ -508,7 +510,7 @@ func storeMeshSnapshot(db *sql.DB, mesh *MeshInfo, ts string) {
 		if _, err := db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			ts, d.Name, d.Role, d.IP, d.MAC, d.Model, d.Firmware, d.Status); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] DB error (mesh): %v\n", logTS, err)
+			logWarn("[%s] DB error (mesh): %v", logTS, err)
 		}
 	}
 }
@@ -528,7 +530,7 @@ func storeWirelessSnapshot(db *sql.DB, wireless *WirelessInfo, ts string) {
 		if _, err := db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			ts, bandName, band.Host.SSID, band.Host.Channel, band.Host.ChannelWidth, hostEnabled, guestEnabled, band.Guest.SSID); err != nil {
-			fmt.Fprintf(os.Stderr, "[%s] DB error (wireless): %v\n", logTS, err)
+			logWarn("[%s] DB error (wireless): %v", logTS, err)
 		}
 	}
 }
@@ -608,7 +610,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 					}
 				}
 			} else {
-				fmt.Printf("[%s] Error getting clients: %v\n", ts, clientErr)
+				logInfo("[%s] Error getting clients: %v", ts, clientErr)
 			}
 
 			var cpuPct, memPct *float64
@@ -617,7 +619,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 				memPct = networkData.Performance.MemPercent
 				storeNetworkSnapshot(db, networkData, timestamp)
 			} else {
-				fmt.Printf("[%s] Error getting network: %v\n", ts, networkErr)
+				logInfo("[%s] Error getting network: %v", ts, networkErr)
 			}
 
 			meshCount := 0
@@ -625,13 +627,13 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 				meshCount = len(meshData.Devices)
 				storeMeshSnapshot(db, meshData, timestamp)
 			} else {
-				fmt.Printf("[%s] Error getting mesh: %v\n", ts, meshErr)
+				logInfo("[%s] Error getting mesh: %v", ts, meshErr)
 			}
 
 			if wirelessErr == nil {
 				storeWirelessSnapshot(db, wirelessData, timestamp)
 			} else {
-				fmt.Printf("[%s] Error getting wireless: %v\n", ts, wirelessErr)
+				logInfo("[%s] Error getting wireless: %v", ts, wirelessErr)
 			}
 
 			cpuStr := "?"
@@ -643,7 +645,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 				memStr = fmt.Sprintf("%.0f%%", *memPct)
 			}
 
-			fmt.Printf("[%s] Cycle #%d: %d clients, CPU %s, Mem %s, %d mesh nodes\n",
+			logInfo("[%s] Cycle #%d: %d clients, CPU %s, Mem %s, %d mesh nodes",
 				ts, cycle+1, clientCount, cpuStr, memStr, meshCount)
 			return nil
 		},
@@ -671,6 +673,57 @@ func loadKnownMACs(db *sql.DB) map[string]bool {
 
 var webhookClient = &http.Client{Timeout: 10 * time.Second}
 
+// isPrivateURL checks if the given URL resolves to a private or loopback address.
+func isPrivateURL(urlStr string) bool {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+
+	ips, err := net.LookupHost(host)
+	if err != nil {
+		return false
+	}
+
+	privateCIDRs := []string{
+		"127.0.0.0/8",
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"169.254.0.0/16",
+	}
+	var privateNets []*net.IPNet
+	for _, cidr := range privateCIDRs {
+		_, n, _ := net.ParseCIDR(cidr)
+		privateNets = append(privateNets, n)
+	}
+
+	for _, ipStr := range ips {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			continue
+		}
+		// Check IPv6 loopback and ULA (fc00::/7)
+		if ip.Equal(net.IPv6loopback) {
+			return true
+		}
+		// fc00::/7 covers fc00:: through fdff::
+		if len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
+			return true
+		}
+		for _, n := range privateNets {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // sendWebhook is fire-and-forget: it logs warnings on failure rather than
 // returning an error, because webhook delivery should never abort the caller's
 // main operation (monitoring, alerting, etc.). This is intentional.
@@ -681,6 +734,10 @@ func sendWebhook(webhookURL string, payload WebhookPayload) {
 
 	if strings.HasPrefix(webhookURL, "http://") {
 		logWarn("webhook URL uses plain HTTP (not HTTPS): %s", webhookURL)
+	}
+
+	if isPrivateURL(webhookURL) {
+		logWarn("webhook URL resolves to a private/loopback address: %s", webhookURL)
 	}
 
 	body, err := json.Marshal(payload)
@@ -769,10 +826,10 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 		return err
 	}
 
-	if err := validatePeriod(period); err != nil {
+	startTime, periodName, err := parsePeriod(period)
+	if err != nil {
 		return err
 	}
-	startTime, periodName := parsePeriod(period)
 	startStr := startTime.Format(time.RFC3339)
 
 	aliases := loadAliases()
@@ -919,27 +976,27 @@ var validPeriods = map[string]bool{
 	"all":   true,
 }
 
-func parsePeriod(period string) (time.Time, string) {
+func parsePeriod(period string) (time.Time, string, error) {
 	switch period {
 	case "today":
 		now := time.Now()
-		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()), "Today"
+		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()), "Today", nil
 	case "hour", "1h":
-		return time.Now().Add(-1 * time.Hour), "Last hour"
+		return time.Now().Add(-1 * time.Hour), "Last hour", nil
 	case "6h":
-		return time.Now().Add(-6 * time.Hour), "Last 6 hours"
+		return time.Now().Add(-6 * time.Hour), "Last 6 hours", nil
 	case "12h":
-		return time.Now().Add(-12 * time.Hour), "Last 12 hours"
+		return time.Now().Add(-12 * time.Hour), "Last 12 hours", nil
 	case "24h":
-		return time.Now().Add(-24 * time.Hour), "Last 24 hours"
+		return time.Now().Add(-24 * time.Hour), "Last 24 hours", nil
 	case "7d":
-		return time.Now().AddDate(0, 0, -7), "Last 7 days"
+		return time.Now().AddDate(0, 0, -7), "Last 7 days", nil
 	case "30d":
-		return time.Now().AddDate(0, 0, -30), "Last 30 days"
+		return time.Now().AddDate(0, 0, -30), "Last 30 days", nil
 	case "all":
-		return time.Time{}, "All time"
+		return time.Time{}, "All time", nil
 	default:
-		return time.Time{}, "All time"
+		return time.Time{}, "", fmt.Errorf("unrecognized period %q", period)
 	}
 }
 
@@ -951,9 +1008,19 @@ func validatePeriod(period string) error {
 	return nil
 }
 
+// cachedInterval caches the result of estimateInterval to avoid redundant queries.
+var cachedInterval struct {
+	since time.Time
+	val   int
+	set   bool
+}
+
 // estimateInterval derives the polling interval from sample timestamps.
 // Returns the median gap between consecutive distinct timestamps, or 5 as fallback.
 func estimateInterval(db *sql.DB, since time.Time) int {
+	if cachedInterval.set && cachedInterval.since.Equal(since) {
+		return cachedInterval.val
+	}
 	rows, err := db.Query(`SELECT DISTINCT timestamp FROM bandwidth_samples
 		WHERE timestamp >= ? ORDER BY timestamp LIMIT 20`, since.Format(time.RFC3339))
 	if err != nil {
@@ -990,11 +1057,16 @@ func estimateInterval(db *sql.DB, since time.Time) int {
 	}
 
 	sort.Ints(gaps)
-	return gaps[len(gaps)/2] // median
+	result := gaps[len(gaps)/2] // median
+	cachedInterval.since = since
+	cachedInterval.val = result
+	cachedInterval.set = true
+	return result
 }
 
 func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group string) error {
-	if err := validatePeriod(period); err != nil {
+	startTime, periodName, err := parsePeriod(period)
+	if err != nil {
 		return err
 	}
 
@@ -1004,7 +1076,11 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 	}
 	defer db.Close()
 
-	startTime, periodName := parsePeriod(period)
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %v", err)
+	}
+	defer tx.Rollback()
 
 	query := `
 		SELECT
@@ -1020,7 +1096,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 		ORDER BY (total_download + total_upload) DESC
 	`
 
-	rows, err := db.Query(query, startTime.Format(time.RFC3339))
+	rows, err := tx.Query(query, startTime.Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("query error: %v", err)
 	}
@@ -1061,7 +1137,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 	// single query would require a self-join or CTE with two different aggregation
 	// levels, adding complexity without meaningful performance benefit since both
 	// queries scan the same index (idx_timestamp) over the same time range.
-	connRows, connErr := db.Query(`SELECT mac, connection, COUNT(*) as samples
+	connRows, connErr := tx.Query(`SELECT mac, connection, COUNT(*) as samples
 		FROM bandwidth_samples WHERE timestamp >= ? GROUP BY mac, connection`,
 		startTime.Format(time.RFC3339))
 	if connErr == nil {
@@ -1160,7 +1236,8 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 }
 
 func runReportNetwork(period string, jsonOut bool) error {
-	if err := validatePeriod(period); err != nil {
+	startTime, periodName, err := parsePeriod(period)
+	if err != nil {
 		return err
 	}
 
@@ -1169,8 +1246,6 @@ func runReportNetwork(period string, jsonOut bool) error {
 		return err
 	}
 	defer db.Close()
-
-	startTime, periodName := parsePeriod(period)
 
 	rows, err := db.Query(`
 		SELECT timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2,
@@ -1204,7 +1279,8 @@ func runReportNetwork(period string, jsonOut bool) error {
 }
 
 func runReportMesh(period string, jsonOut bool) error {
-	if err := validatePeriod(period); err != nil {
+	startTime, periodName, err := parsePeriod(period)
+	if err != nil {
 		return err
 	}
 
@@ -1213,8 +1289,6 @@ func runReportMesh(period string, jsonOut bool) error {
 		return err
 	}
 	defer db.Close()
-
-	startTime, periodName := parsePeriod(period)
 
 	rows, err := db.Query(`
 		SELECT timestamp, name, role, ip, mac, status, firmware
@@ -1450,7 +1524,8 @@ func runReboot(force bool) error {
 	return nil
 }
 
-func runBlock(mac string) error {
+// runBlockAction contains the shared logic for blocking/unblocking a device.
+func runBlockAction(mac string, block bool) error {
 	if !validMAC(mac) {
 		// Try resolving as alias or device name
 		db, err := initDB()
@@ -1472,42 +1547,26 @@ func runBlock(mac string) error {
 	}
 	defer client.Logout()
 
-	if err := client.BlockClient(mac); err != nil {
-		return fmt.Errorf("blocking device: %v", err)
+	if block {
+		if err := client.BlockClient(mac); err != nil {
+			return fmt.Errorf("blocking device: %v", err)
+		}
+		fmt.Printf("Blocked device %s\n", mac)
+	} else {
+		if err := client.UnblockClient(mac); err != nil {
+			return fmt.Errorf("unblocking device: %v", err)
+		}
+		fmt.Printf("Unblocked device %s\n", mac)
 	}
-
-	fmt.Printf("Blocked device %s\n", mac)
 	return nil
 }
 
+func runBlock(mac string) error {
+	return runBlockAction(mac, true)
+}
+
 func runUnblock(mac string) error {
-	if !validMAC(mac) {
-		// Try resolving as alias or device name
-		db, err := initDB()
-		if err != nil {
-			return fmt.Errorf("invalid MAC address %q (and cannot open DB to resolve name: %v)", mac, err)
-		}
-		defer db.Close()
-		resolved, err := resolveDeviceMAC(db, mac)
-		if err != nil {
-			return fmt.Errorf("invalid MAC address %q and could not resolve as device name", mac)
-		}
-		mac = resolved
-	}
-	mac = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(mac, ":", "-"), ".", "-"))
-
-	client, _, err := connectClient()
-	if err != nil {
-		return err
-	}
-	defer client.Logout()
-
-	if err := client.UnblockClient(mac); err != nil {
-		return fmt.Errorf("unblocking device: %v", err)
-	}
-
-	fmt.Printf("Unblocked device %s\n", mac)
-	return nil
+	return runBlockAction(mac, false)
 }
 
 func runAlias(remove bool, args []string) error {
