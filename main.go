@@ -81,7 +81,7 @@ func clientsCmd() *cobra.Command {
 	cmd.Flags().IntP("interval", "i", 5, "Refresh interval in seconds")
 	cmd.Flags().StringP("name", "n", "", "Filter by device name")
 	cmd.Flags().StringP("mac", "m", "", "Filter by MAC address")
-	cmd.Flags().Int("max-failures", 10, "Max consecutive failures before giving up")
+	cmd.Flags().Int("max-failures", maxConsecutiveFailures, "Max consecutive failures before giving up")
 	return cmd
 }
 
@@ -145,7 +145,7 @@ func pollCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntP("interval", "i", 5, "Polling interval in seconds")
-	cmd.Flags().Int("max-failures", 10, "Max consecutive failures before giving up")
+	cmd.Flags().Int("max-failures", maxConsecutiveFailures, "Max consecutive failures before giving up")
 	return cmd
 }
 
@@ -166,7 +166,7 @@ func monitorCmd() *cobra.Command {
 	cmd.Flags().Bool("notify", false, "Alert on new MAC addresses")
 	cmd.Flags().Int("alert", 0, "Alert when any device exceeds this KB/s (0 = disabled)")
 	cmd.Flags().String("webhook", "", "Webhook URL for POST notifications")
-	cmd.Flags().Int("max-failures", 10, "Max consecutive failures before giving up")
+	cmd.Flags().Int("max-failures", maxConsecutiveFailures, "Max consecutive failures before giving up")
 	return cmd
 }
 
@@ -273,9 +273,9 @@ func statusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show database statistics",
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			jsonOut, _ := cmd.Flags().GetBool("json")
-			runStatus(jsonOut)
+			return runStatus(jsonOut)
 		},
 	}
 	cmd.Flags().BoolP("json", "j", false, "Output as JSON")
@@ -286,11 +286,11 @@ func purgeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "purge",
 		Short: "Delete records (all, or by --days/--before)",
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			force, _ := cmd.Flags().GetBool("force")
 			beforeStr, _ := cmd.Flags().GetString("before")
 			days, _ := cmd.Flags().GetInt("days")
-			runPurge(force, beforeStr, days)
+			return runPurge(force, beforeStr, days)
 		},
 	}
 	cmd.Flags().BoolP("force", "f", false, "Skip confirmation")

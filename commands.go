@@ -15,6 +15,7 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -104,7 +105,7 @@ func connectClient() (*DecoClient, *Config, error) {
 			break
 		}
 		if attempt < 3 {
-			time.Sleep(2 * time.Second)
+			time.Sleep(backoff(attempt-1, 1*time.Second, 5*time.Second))
 		}
 	}
 	if authErr != nil {
@@ -453,14 +454,7 @@ func runPoll(interval int, maxFailures int) error {
 				return err
 			}
 
-			timestamp := time.Now().Format(time.RFC3339)
-			for _, c := range data.Clients {
-				if _, err := db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-					timestamp, c.MAC, c.Name, c.IP, c.Connection, c.Type, c.DownloadKbps, c.UploadKbps); err != nil {
-					fmt.Printf("DB error: %v\n", err)
-				}
-			}
+			storeBandwidthSamples(db, data, time.Now().Format(time.RFC3339))
 
 			activeCount := 0
 			var totalDown, totalUp int64
@@ -669,6 +663,9 @@ func loadKnownMACs(db *sql.DB) map[string]bool {
 			known[strings.ToUpper(mac)] = true
 		}
 	}
+	if err := rows.Err(); err != nil {
+		logWarn("error iterating known MACs: %v", err)
+	}
 	return known
 }
 
@@ -706,7 +703,17 @@ func sendWebhook(webhookURL string, payload WebhookPayload) {
 // notifyNewMAC is best-effort: it logs and sends notifications but does not
 // return error, since notification failure should not interrupt the monitor loop.
 func notifyNewMAC(mac, name, ip, webhookURL string) {
-	msg := fmt.Sprintf("NEW DEVICE: %s (%s) at %s", name, mac, ip)
+	// Sanitize for AppleScript embedding: replace double quotes, strip control chars
+	safeName := strings.Map(func(r rune) rune {
+		if r == '"' {
+			return '\''
+		}
+		if r < 32 {
+			return -1 // strip control characters
+		}
+		return r
+	}, name)
+	msg := fmt.Sprintf("NEW DEVICE: %s (%s) at %s", safeName, mac, ip)
 	logInfo("%s", msg)
 
 	// macOS desktop notification (best-effort)
@@ -841,6 +848,9 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 				report.Timeline = append(report.Timeline, b)
 			}
 		}
+		if err := rows.Err(); err != nil {
+			logWarn("error iterating timeline rows: %v", err)
+		}
 	}
 
 	// Query 3: Connection type breakdown
@@ -860,6 +870,9 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 				report.Connections = append(report.Connections, cb)
 			}
 		}
+		if err := connRows.Err(); err != nil {
+			logWarn("error iterating connection breakdown rows: %v", err)
+		}
 	}
 
 	// Query 4: IP history
@@ -877,6 +890,9 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 			if err := ipRows.Scan(&iph.IP, &iph.FirstSeen, &iph.LastSeen, &iph.Samples); err == nil {
 				report.IPHistory = append(report.IPHistory, iph)
 			}
+		}
+		if err := ipRows.Err(); err != nil {
+			logWarn("error iterating IP history rows: %v", err)
 		}
 	}
 
@@ -953,6 +969,9 @@ func estimateInterval(db *sql.DB, since time.Time) int {
 				timestamps = append(timestamps, t)
 			}
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return 5
 	}
 
 	if len(timestamps) < 2 {
@@ -1056,6 +1075,9 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 				}
 				breakdown[m][conn] = count
 			}
+		}
+		if err := connRows.Err(); err != nil {
+			logWarn("error iterating connection breakdown: %v", err)
 		}
 		connRows.Close()
 		for i := range devices {
@@ -1169,6 +1191,9 @@ func runReportNetwork(period string, jsonOut bool) error {
 		}
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating network rows: %v", err)
+	}
 
 	if jsonOut {
 		printJSON(entries)
@@ -1209,6 +1234,9 @@ func runReportMesh(period string, jsonOut bool) error {
 		}
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating mesh rows: %v", err)
+	}
 
 	if jsonOut {
 		printJSON(entries)
@@ -1230,16 +1258,15 @@ type statusInfo struct {
 	LastSample    string `json:"last_sample"`
 }
 
-func runStatus(jsonOut bool) {
+func runStatus(jsonOut bool) error {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		fmt.Println("No database found. Run 'poll' first to collect data.")
-		return
+		return nil
 	}
 
 	db, err := initDB()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return
+		return err
 	}
 	defer db.Close()
 
@@ -1247,13 +1274,13 @@ func runStatus(jsonOut bool) {
 	var firstSample, lastSample sql.NullString
 
 	if err := db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&totalSamples); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to count samples: %v\n", err)
+		return fmt.Errorf("failed to count samples: %v", err)
 	}
 	if err := db.QueryRow("SELECT COUNT(DISTINCT mac) FROM bandwidth_samples").Scan(&uniqueDevices); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to count devices: %v\n", err)
+		return fmt.Errorf("failed to count devices: %v", err)
 	}
 	if err := db.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM bandwidth_samples").Scan(&firstSample, &lastSample); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to get time range: %v\n", err)
+		return fmt.Errorf("failed to get time range: %v", err)
 	}
 
 	size := getDBSize()
@@ -1269,7 +1296,7 @@ func runStatus(jsonOut bool) {
 			FirstSample:   firstSample.String,
 			LastSample:    lastSample.String,
 		})
-		return
+		return nil
 	}
 
 	fmt.Printf("\nDatabase: %s\n", dbPath)
@@ -1278,18 +1305,18 @@ func runStatus(jsonOut bool) {
 	fmt.Printf("Unique devices: %d\n", uniqueDevices)
 	fmt.Printf("First sample: %s\n", firstSample.String)
 	fmt.Printf("Last sample: %s\n", lastSample.String)
+	return nil
 }
 
-func runPurge(force bool, beforeStr string, days int) {
+func runPurge(force bool, beforeStr string, days int) error {
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		fmt.Println("No database found. Nothing to purge.")
-		return
+		return nil
 	}
 
 	db, err := initDB()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return
+		return err
 	}
 	defer db.Close()
 
@@ -1298,8 +1325,7 @@ func runPurge(force bool, beforeStr string, days int) {
 	if beforeStr != "" {
 		cutoff, err = time.Parse("2006-01-02", beforeStr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: invalid date %q (use YYYY-MM-DD)\n", beforeStr)
-			return
+			return fmt.Errorf("invalid date %q (use YYYY-MM-DD)", beforeStr)
 		}
 		selective = true
 	} else if days > 0 {
@@ -1319,26 +1345,24 @@ func runPurge(force bool, beforeStr string, days int) {
 			fmt.Scanln(&confirm)
 			if strings.ToLower(confirm) != "yes" {
 				fmt.Println("Purge cancelled.")
-				return
+				return nil
 			}
 		}
 
 		deleted, err := purgeByDate(db, cutoff)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error during purge: %v\n", err)
-			return
+			return fmt.Errorf("purge failed: %v", err)
 		}
 
 		fmt.Printf("Purged %d records older than %s\n", deleted, cutoff.Format("2006-01-02"))
 		fmt.Printf("Database size after purge: %s\n", formatSize(getDBSize()))
-		return
+		return nil
 	}
 
 	// Full purge
 	var totalSamples int64
 	if err := db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&totalSamples); err != nil {
-		fmt.Fprintf(os.Stderr, "Error counting records: %v\n", err)
-		return
+		return fmt.Errorf("counting records: %v", err)
 	}
 
 	if !force {
@@ -1350,20 +1374,23 @@ func runPurge(force bool, beforeStr string, days int) {
 		fmt.Scanln(&confirm)
 		if strings.ToLower(confirm) != "yes" {
 			fmt.Println("Purge cancelled.")
-			return
+			return nil
 		}
 	}
 
 	for _, table := range allTables {
 		if _, err := db.Exec("DELETE FROM " + table); err != nil {
-			fmt.Fprintf(os.Stderr, "Error deleting from %s: %v\n", table, err)
+			return fmt.Errorf("deleting from %s: %v", table, err)
 		}
 	}
 
-	db.Exec("VACUUM")
+	if _, err := db.Exec("VACUUM"); err != nil {
+		logWarn("VACUUM failed: %v", err)
+	}
 
 	fmt.Printf("Purged all records from database.\n")
 	fmt.Printf("Database size after purge: %s\n", formatSize(getDBSize()))
+	return nil
 }
 
 var allTables = []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
@@ -1392,7 +1419,9 @@ func purgeByDate(db *sql.DB, cutoff time.Time) (int64, error) {
 		n, _ := result.RowsAffected()
 		total += n
 	}
-	db.Exec("VACUUM")
+	if _, err := db.Exec("VACUUM"); err != nil {
+		logWarn("VACUUM failed: %v", err)
+	}
 	return total, nil
 }
 
@@ -1543,6 +1572,7 @@ func runAlias(remove bool, args []string) error {
 }
 
 // tagCache caches the parsed tags file to avoid re-reading on every call.
+var tagMu sync.RWMutex
 var tagCache struct {
 	modTime time.Time
 	data    map[string][]string
@@ -1554,9 +1584,13 @@ func loadTags() map[string][]string {
 	if err != nil {
 		return map[string][]string{}
 	}
+
+	tagMu.RLock()
 	if tagCache.data != nil && info.ModTime().Equal(tagCache.modTime) {
+		defer tagMu.RUnlock()
 		return tagCache.data
 	}
+	tagMu.RUnlock()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1568,8 +1602,11 @@ func loadTags() map[string][]string {
 		logWarn("corrupt %s file, ignoring: %v", "deco_tags.json", err)
 		return map[string][]string{}
 	}
+
+	tagMu.Lock()
 	tagCache.modTime = info.ModTime()
 	tagCache.data = tags
+	tagMu.Unlock()
 	return tags
 }
 
@@ -1594,8 +1631,10 @@ func saveTags(tags map[string][]string) error {
 		return fmt.Errorf("saving tags: %v", err)
 	}
 	// Invalidate tag cache so next loadTags picks up the change
+	tagMu.Lock()
 	tagCache.data = nil
 	tagCache.modTime = time.Time{}
+	tagMu.Unlock()
 	return nil
 }
 
@@ -1687,6 +1726,7 @@ func runAliasTags() error {
 }
 
 // aliasCache caches the parsed aliases file to avoid re-reading on every call.
+var aliasMu sync.RWMutex
 var aliasCache struct {
 	modTime time.Time
 	data    map[string]string
@@ -1698,9 +1738,13 @@ func loadAliases() map[string]string {
 	if err != nil {
 		return map[string]string{}
 	}
+
+	aliasMu.RLock()
 	if aliasCache.data != nil && info.ModTime().Equal(aliasCache.modTime) {
+		defer aliasMu.RUnlock()
 		return aliasCache.data
 	}
+	aliasMu.RUnlock()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1712,8 +1756,11 @@ func loadAliases() map[string]string {
 		logWarn("corrupt %s file, ignoring: %v", "deco_aliases.json", err)
 		return map[string]string{}
 	}
+
+	aliasMu.Lock()
 	aliasCache.modTime = info.ModTime()
 	aliasCache.data = aliases
+	aliasMu.Unlock()
 	return aliases
 }
 
@@ -1731,8 +1778,10 @@ func saveAliases(aliases map[string]string) error {
 		return fmt.Errorf("saving aliases: %v", err)
 	}
 	// Invalidate alias cache so next loadAliases picks up the change
+	aliasMu.Lock()
 	aliasCache.data = nil
 	aliasCache.modTime = time.Time{}
+	aliasMu.Unlock()
 	return nil
 }
 

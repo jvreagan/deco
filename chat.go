@@ -20,6 +20,10 @@ import (
 const defaultOllamaModel = "llama3.2"
 const defaultOllamaURL = "http://localhost:11434"
 
+// ollamaClient is a dedicated HTTP client for Ollama API requests,
+// avoiding the shared http.DefaultClient which has no timeout.
+var ollamaClient = &http.Client{Timeout: 5 * time.Minute}
+
 type ollamaMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -154,7 +158,7 @@ const (
 // gatherNetworkContext builds a structured text prompt with live router data and/or DB history.
 // When compact is true, limits are tighter to fit smaller context windows.
 // If db is non-nil it is used for historical queries; otherwise the function opens its own connection.
-func gatherNetworkContext(compact bool, db ...*sql.DB) string {
+func gatherNetworkContext(compact bool, db *sql.DB) string {
 	bandwidthLimit := maxBandwidthDevices
 	knownLimit := maxKnownDevices
 	netSnapLimit := maxNetworkSnapshots
@@ -268,8 +272,8 @@ func gatherNetworkContext(compact bool, db ...*sql.DB) string {
 	// Historical data from DB
 	var histDB *sql.DB
 	var closeDB bool
-	if len(db) > 0 && db[0] != nil {
-		histDB = db[0]
+	if db != nil {
+		histDB = db
 	} else if d, err := initDB(); err == nil {
 		histDB = d
 		closeDB = true
@@ -324,6 +328,9 @@ func appendBandwidthHistory(sb *strings.Builder, db *sql.DB, aliases map[string]
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		logWarn("error iterating bandwidth rows: %v", err)
+	}
 	if len(entries) == 0 {
 		return
 	}
@@ -373,6 +380,9 @@ func appendNetworkHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr s
 		if err := rows.Scan(&s.ts, &s.ip, &s.cpu, &s.mem); err == nil {
 			snaps = append(snaps, s)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		logWarn("error iterating network snapshots: %v", err)
 	}
 	if len(snaps) == 0 {
 		return
@@ -445,6 +455,9 @@ func appendMeshHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr stri
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		logWarn("error iterating mesh snapshots: %v", err)
+	}
 	if len(nodes) == 0 {
 		return
 	}
@@ -484,6 +497,9 @@ func appendKnownDevices(sb *strings.Builder, db *sql.DB, aliases map[string]stri
 		if err := rows.Scan(&mac, &name, &lastSeen, &samples); err == nil {
 			devs = append(devs, knownDev{mac.String, name.String, lastSeen, samples})
 		}
+	}
+	if err := rows.Err(); err != nil {
+		logWarn("error iterating known devices: %v", err)
 	}
 	if len(devs) == 0 {
 		return
@@ -529,7 +545,7 @@ func streamOllamaChat(ctx context.Context, ollamaURL string, req ollamaChatReque
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(httpReq)
+	resp, err := ollamaClient.Do(httpReq)
 	if err != nil {
 		fmt.Fprint(os.Stderr, "\r            \r")
 		return "", fmt.Errorf("ollama request failed: %v", err)
@@ -586,7 +602,6 @@ func resolveOllamaURL(flagURL string) string {
 // runChat is the main entry point for the chat command.
 func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 	ollamaURL = resolveOllamaURL(ollamaURL)
-
 	if err := checkOllama(ollamaURL); err != nil {
 		return err
 	}
@@ -785,7 +800,7 @@ func processChatCommand(input string, state *chatState) (bool, error) {
 // networkSnapshot holds a snapshot of connected devices for diffing on refresh.
 type networkSnapshot struct {
 	DeviceMACs map[string]string // MAC -> name
-	WAN_IP     string
+	WANIP     string
 	DeviceCount int
 }
 
@@ -829,7 +844,7 @@ func parseNetworkSnapshot(prompt string) networkSnapshot {
 			parts := strings.Split(line, "|")
 			if len(parts) > 0 {
 				wan := strings.TrimPrefix(parts[0], "WAN IP: ")
-				snap.WAN_IP = strings.TrimSpace(wan)
+				snap.WANIP = strings.TrimSpace(wan)
 			}
 		}
 	}
@@ -868,8 +883,8 @@ func diffNetworkSnapshots(old, new networkSnapshot) string {
 	}
 
 	// WAN IP change
-	if old.WAN_IP != "" && new.WAN_IP != "" && old.WAN_IP != new.WAN_IP {
-		sb.WriteString(fmt.Sprintf("WAN IP: %s → %s\n", old.WAN_IP, new.WAN_IP))
+	if old.WANIP != "" && new.WANIP != "" && old.WANIP != new.WANIP {
+		sb.WriteString(fmt.Sprintf("WAN IP: %s → %s\n", old.WANIP, new.WANIP))
 	}
 
 	result := sb.String()

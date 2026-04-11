@@ -17,10 +17,13 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 const maxResponseSize = 10 * 1024 * 1024 // 10 MB
+
+var sysauthRegexp = regexp.MustCompile(`sysauth=([^;]+)`)
 
 // Config holds router credentials
 type Config struct {
@@ -36,10 +39,11 @@ const sessionTimeout = 5 * time.Minute
 // to avoid hammering the router. See issue #39.
 const minRequestInterval = 100 * time.Millisecond
 
-// DecoClient is not safe for concurrent use. Create separate instances for concurrent operations.
+// DecoClient is safe for concurrent use; a mutex serializes access to session state.
 type DecoClient struct {
 	host         string
 	password     string
+	mu           sync.Mutex
 	client       *http.Client
 	stok         string
 	sysauth      string
@@ -130,12 +134,14 @@ func (dc *DecoClient) baseURL() string {
 
 // EnsureAuthorized checks if the session is active and re-authorizes if needed.
 func (dc *DecoClient) EnsureAuthorized() error {
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
 	if dc.logged && time.Since(dc.lastAuthTime) < sessionTimeout {
 		return nil
 	}
 	if dc.logged {
 		logDebug("session older than %s, re-authenticating", sessionTimeout)
-		dc.Invalidate()
+		dc.invalidate()
 	}
 	// Reset HTTP client to clear stale cookies
 	jar, _ := cookiejar.New(nil) // cookiejar.New never returns an error with nil options
@@ -150,6 +156,13 @@ func (dc *DecoClient) EnsureAuthorized() error {
 
 // Invalidate marks the session as expired so EnsureAuthorized will re-auth.
 func (dc *DecoClient) Invalidate() {
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+	dc.invalidate()
+}
+
+// invalidate is the lock-free implementation of Invalidate; callers must hold dc.mu.
+func (dc *DecoClient) invalidate() {
 	dc.logged = false
 	dc.stok = ""
 	dc.sysauth = ""
@@ -349,8 +362,7 @@ func (dc *DecoClient) Authorize() error {
 
 	// Extract sysauth cookie
 	cookieHeader := resp.Header.Get("Set-Cookie")
-	re := regexp.MustCompile(`sysauth=([^;]+)`)
-	matches := re.FindStringSubmatch(cookieHeader)
+	matches := sysauthRegexp.FindStringSubmatch(cookieHeader)
 	if len(matches) > 1 {
 		dc.sysauth = matches[1]
 	}
@@ -361,6 +373,13 @@ func (dc *DecoClient) Authorize() error {
 }
 
 func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
+	return dc.requestOnceUnlocked(path, reqData)
+}
+
+// requestOnceUnlocked is the lock-free implementation of requestOnce; callers must hold dc.mu.
+func (dc *DecoClient) requestOnceUnlocked(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
 	// Rate limit: ensure at least minRequestInterval between consecutive requests
 	// to prevent hammering the router (issue #39).
 	if !dc.lastRequest.IsZero() {
@@ -491,8 +510,12 @@ func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[
 }
 
 func (dc *DecoClient) Logout() {
+	dc.mu.Lock()
+	defer dc.mu.Unlock()
 	if dc.logged {
-		dc.Request("admin/system?form=logout", map[string]interface{}{"operation": "write"})
+		if _, err := dc.requestOnceUnlocked("admin/system?form=logout", map[string]interface{}{"operation": "write"}); err != nil {
+			logDebug("logout request failed: %v", err)
+		}
 		dc.logged = false
 	}
 }

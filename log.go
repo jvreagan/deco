@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,12 +17,16 @@ const (
 	LevelError
 )
 
-var logLevel = LevelWarn // default: only warnings and errors
+var logLevel atomic.Int32
+
+func init() {
+	logLevel.Store(int32(LevelWarn)) // default: only warnings and errors
+}
 
 // SetVerbose enables debug-level logging when v is true.
 func SetVerbose(v bool) {
 	if v {
-		logLevel = LevelDebug
+		logLevel.Store(int32(LevelDebug))
 	}
 }
 
@@ -31,7 +36,7 @@ func logWarn(format string, args ...interface{})   { logAt(LevelWarn, "WRN", for
 func logError(format string, args ...interface{})  { logAt(LevelError, "ERR", format, args...) }
 
 func logAt(level LogLevel, prefix, format string, args ...interface{}) {
-	if level < logLevel {
+	if int32(level) < logLevel.Load() {
 		return
 	}
 	msg := fmt.Sprintf(format, args...)

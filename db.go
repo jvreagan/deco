@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -104,6 +105,10 @@ func getSchemaVersion(db *sql.DB) (int, error) {
 	return version, err
 }
 
+// setSchemaVersion sets the SQLite user_version pragma. fmt.Sprintf is used
+// because PRAGMA statements do not support parameterized queries (?). The
+// version argument comes from hardcoded migration constants, not user input,
+// so SQL injection is not a concern here.
 func setSchemaVersion(db *sql.DB, version int) error {
 	_, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", version))
 	return err
@@ -120,8 +125,20 @@ func runMigrations(db *sql.DB) error {
 			continue
 		}
 		logDebug("running migration to schema version %d", m.version)
-		if _, err := db.Exec(m.sql); err != nil {
+
+		// Wrap each migration in a transaction for atomicity.
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin migration %d: %v", m.version, err)
+		}
+		if _, err := tx.Exec(m.sql); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("migration to version %d failed: %v", m.version, err)
+		}
+		// PRAGMA user_version cannot be set inside a transaction in all SQLite
+		// drivers, so we commit the DDL first, then set the version.
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %d: %v", m.version, err)
 		}
 		if err := setSchemaVersion(db, m.version); err != nil {
 			return fmt.Errorf("setting schema version %d: %v", m.version, err)
@@ -164,6 +181,7 @@ func getDBSize() int64 {
 // dbSizeCheckThrottleSec controls how often checkDBSizeLimit re-stats the file.
 const dbSizeCheckThrottleSec = 60
 
+var dbSizeCheckMu sync.Mutex
 var (
 	lastDBSizeCheckTime time.Time
 	lastDBSizeCheckOK   bool
@@ -171,6 +189,9 @@ var (
 )
 
 func checkDBSizeLimit() (bool, int64) {
+	dbSizeCheckMu.Lock()
+	defer dbSizeCheckMu.Unlock()
+
 	now := time.Now()
 	if !lastDBSizeCheckTime.IsZero() && now.Sub(lastDBSizeCheckTime).Seconds() < float64(dbSizeCheckThrottleSec) {
 		return lastDBSizeCheckOK, lastDBSizeCheckSize
@@ -201,11 +222,22 @@ func pruneOlderThan(db *sql.DB, days int) error {
 	// Safety: table names are hardcoded string literals below, not user input,
 	// so direct concatenation into the query is safe from SQL injection.
 	tables := []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin prune transaction: %v", err)
+	}
 	for _, table := range tables {
-		if _, err := db.Exec("DELETE FROM "+table+" WHERE timestamp < ?", cutoff); err != nil {
+		if _, err := tx.Exec("DELETE FROM "+table+" WHERE timestamp < ?", cutoff); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("failed to prune %s: %v", table, err)
 		}
 	}
-	db.Exec("VACUUM")
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit prune transaction: %v", err)
+	}
+	if _, err := db.Exec("VACUUM"); err != nil {
+		logWarn("VACUUM failed: %v", err)
+	}
 	return nil
 }

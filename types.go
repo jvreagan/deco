@@ -144,7 +144,7 @@ type WebhookPayload struct {
 	Event     string      `json:"event"`
 	Timestamp string      `json:"timestamp"`
 	Text      string      `json:"text"`
-	Data      interface{} `json:"data"`
+	Data      any         `json:"data"`
 }
 
 // NewDeviceEvent is the data payload for a "new_device" webhook event.

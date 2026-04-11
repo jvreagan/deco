@@ -171,26 +171,26 @@ func TestFormatBytes(t *testing.T) {
 // ==================== LOGGER TESTS ====================
 
 func TestSetVerbose(t *testing.T) {
-	origLevel := logLevel
-	defer func() { logLevel = origLevel }()
+	origLevel := logLevel.Load()
+	defer func() { logLevel.Store(origLevel) }()
 
-	logLevel = LevelWarn
+	logLevel.Store(int32(LevelWarn))
 	SetVerbose(true)
-	if logLevel != LevelDebug {
-		t.Errorf("SetVerbose(true): logLevel = %d, want %d", logLevel, LevelDebug)
+	if logLevel.Load() != int32(LevelDebug) {
+		t.Errorf("SetVerbose(true): logLevel = %d, want %d", logLevel.Load(), LevelDebug)
 	}
 
 	// SetVerbose(false) should not change level
-	logLevel = LevelWarn
+	logLevel.Store(int32(LevelWarn))
 	SetVerbose(false)
-	if logLevel != LevelWarn {
-		t.Errorf("SetVerbose(false): logLevel = %d, want %d", logLevel, LevelWarn)
+	if logLevel.Load() != int32(LevelWarn) {
+		t.Errorf("SetVerbose(false): logLevel = %d, want %d", logLevel.Load(), LevelWarn)
 	}
 }
 
 func TestLogLevels(t *testing.T) {
-	origLevel := logLevel
-	defer func() { logLevel = origLevel }()
+	origLevel := logLevel.Load()
+	defer func() { logLevel.Store(origLevel) }()
 
 	// Capture stderr
 	oldStderr := os.Stderr
@@ -198,7 +198,7 @@ func TestLogLevels(t *testing.T) {
 	os.Stderr = w
 
 	// At default level (Warn), debug should be hidden
-	logLevel = LevelWarn
+	logLevel.Store(int32(LevelWarn))
 	logDebug("hidden message")
 	logWarn("visible warning")
 
@@ -220,7 +220,7 @@ func TestLogLevels(t *testing.T) {
 	r2, w2, _ := os.Pipe()
 	os.Stderr = w2
 
-	logLevel = LevelDebug
+	logLevel.Store(int32(LevelDebug))
 	logDebug("now visible")
 
 	w2.Close()
@@ -1412,7 +1412,9 @@ func TestPurgeUsesInitDB(t *testing.T) {
 	f.Close()
 
 	// Should not panic — initDB will create tables
-	runPurge(true, "", 0)
+	if err := runPurge(true, "", 0); err != nil {
+		t.Fatalf("runPurge failed: %v", err)
+	}
 }
 
 // ==================== POLL LOOP TESTS ====================
@@ -2136,7 +2138,9 @@ func TestRunStatusNoDB(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	runStatus(false)
+	if err := runStatus(false); err != nil {
+		t.Fatalf("runStatus failed: %v", err)
+	}
 
 	w.Close()
 	os.Stdout = old
@@ -2163,7 +2167,9 @@ func TestRunStatusWithData(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	runStatus(false)
+	if err := runStatus(false); err != nil {
+		t.Fatalf("runStatus failed: %v", err)
+	}
 
 	w.Close()
 	os.Stdout = old
@@ -2192,7 +2198,9 @@ func TestRunPurgeNoDB(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	runPurge(true, "", 0)
+	if err := runPurge(true, "", 0); err != nil {
+		t.Fatalf("runPurge failed: %v", err)
+	}
 
 	w.Close()
 	os.Stdout = old
@@ -2218,7 +2226,9 @@ func TestRunPurgeForceAll(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	runPurge(true, "", 0)
+	if err := runPurge(true, "", 0); err != nil {
+		t.Fatalf("runPurge failed: %v", err)
+	}
 
 	w.Close()
 	os.Stdout = old
@@ -2254,7 +2264,11 @@ func TestRunPurgeByDays(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	runPurge(true, "", 7)
+	if err := runPurge(true, "", 7); err != nil {
+		w.Close()
+		os.Stdout = old
+		t.Fatalf("runPurge failed: %v", err)
+	}
 
 	w.Close()
 	os.Stdout = old
@@ -2291,7 +2305,11 @@ func TestRunPurgeByBefore(t *testing.T) {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
-	runPurge(true, beforeDate, 0)
+	if err := runPurge(true, beforeDate, 0); err != nil {
+		w.Close()
+		os.Stdout = old
+		t.Fatalf("runPurge failed: %v", err)
+	}
 
 	w.Close()
 	os.Stdout = old
@@ -2312,28 +2330,14 @@ func TestRunPurgeByBefore(t *testing.T) {
 }
 
 func TestRunPurgeInvalidDate(t *testing.T) {
-	db := setupTestDB(t)
+	_ = setupTestDB(t)
 
-	ts := time.Now().Format(time.RFC3339)
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
-		VALUES (?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
-
-	// Capture stderr to verify error message
-	oldErr := os.Stderr
-	rErr, wErr, _ := os.Pipe()
-	os.Stderr = wErr
-
-	runPurge(true, "not-a-date", 0)
-
-	wErr.Close()
-	os.Stderr = oldErr
-
-	var buf bytes.Buffer
-	buf.ReadFrom(rErr)
-	output := buf.String()
-
-	if !strings.Contains(output, "invalid date") {
-		t.Errorf("purge with bad date should say 'invalid date', got: %s", output)
+	err := runPurge(true, "not-a-date", 0)
+	if err == nil {
+		t.Fatal("runPurge with bad date should return an error")
+	}
+	if !strings.Contains(err.Error(), "invalid date") {
+		t.Errorf("error should mention 'invalid date', got: %v", err)
 	}
 }
 
@@ -2577,14 +2581,14 @@ func TestRunMonitorNoConfig(t *testing.T) {
 // ==================== logError TESTS ====================
 
 func TestLogError(t *testing.T) {
-	origLevel := logLevel
-	defer func() { logLevel = origLevel }()
+	origLevel := logLevel.Load()
+	defer func() { logLevel.Store(origLevel) }()
 
 	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
-	logLevel = LevelError
+	logLevel.Store(int32(LevelError))
 	logError("test error message")
 
 	w.Close()
