@@ -1,7 +1,10 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -186,5 +189,55 @@ func TestDashboardCmdExists(t *testing.T) {
 	}
 	if interval != 10 {
 		t.Errorf("expected default interval=10, got %d", interval)
+	}
+}
+
+// TestFetchDataConcurrent verifies that calling fetchData from multiple
+// goroutines (simulating concurrent dashboard ticks) does not cause data
+// races. Run with -race to exercise the race detector (#88).
+func TestFetchDataConcurrent(t *testing.T) {
+	// Mock HTTP server that returns a minimal JSON response for all
+	// endpoints. The response is not a valid Deco protocol exchange, so
+	// EnsureAuthorized will fail and fetchData will return dataMsg{err: ...}.
+	// That is fine: the goal is to verify no races on shared DecoClient state.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"error_code": -1}`))
+	}))
+	defer srv.Close()
+
+	// Strip the "http://" prefix to get just host:port for NewDecoClient.
+	host := strings.TrimPrefix(srv.URL, "http://")
+	dc := NewDecoClient(host, "testpassword")
+
+	const goroutines = 10
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+
+	results := make([]tea.Msg, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			cmd := fetchData(dc)
+			results[idx] = cmd()
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Every invocation should return a dataMsg (possibly with an error).
+	for i, msg := range results {
+		dm, ok := msg.(dataMsg)
+		if !ok {
+			t.Errorf("goroutine %d: expected dataMsg, got %T", i, msg)
+			continue
+		}
+		// Since the mock server does not speak the Deco protocol,
+		// EnsureAuthorized will fail and we expect an error.
+		if dm.err == nil {
+			t.Errorf("goroutine %d: expected error from mock server, got nil", i)
+		}
 	}
 }

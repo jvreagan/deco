@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chzyer/readline"
@@ -186,8 +187,23 @@ func gatherNetworkContext(compact bool, db *sql.DB) (string, networkSnapshot) {
 		defer client.Logout()
 		liveOK = true
 
+		// Fetch all router data in parallel — each call is independent.
+		var (
+			clients  *ClientList
+			network  *NetworkInfo
+			mesh     *MeshInfo
+			wifi     *WirelessInfo
+			wg       sync.WaitGroup
+		)
+		wg.Add(4)
+		go func() { defer wg.Done(); clients, _ = client.GetClients() }()
+		go func() { defer wg.Done(); network, _ = client.GetNetwork() }()
+		go func() { defer wg.Done(); mesh, _ = client.GetMesh() }()
+		go func() { defer wg.Done(); wifi, _ = client.GetWireless() }()
+		wg.Wait()
+
 		// Clients
-		if clients, err := client.GetClients(); err == nil && clients != nil {
+		if clients != nil {
 			snap.DeviceCount = clients.Count
 			sb.WriteString(fmt.Sprintf("\n=== CONNECTED DEVICES (%d) ===\n", clients.Count))
 			sb.WriteString(fmt.Sprintf("%-25s %-16s %-18s %-14s %-10s %-10s\n",
@@ -215,21 +231,21 @@ func gatherNetworkContext(compact bool, db *sql.DB) (string, networkSnapshot) {
 		}
 
 		// Network
-		if net, err := client.GetNetwork(); err == nil && net != nil {
-			snap.WANIP = net.WAN.IP
+		if network != nil {
+			snap.WANIP = network.WAN.IP
 			sb.WriteString("\n=== NETWORK ===\n")
-			sb.WriteString(fmt.Sprintf("WAN IP: %s | Gateway: %s", net.WAN.IP, net.WAN.Gateway))
-			if net.Performance.CPUPercent != nil {
-				sb.WriteString(fmt.Sprintf(" | CPU: %.0f%%", *net.Performance.CPUPercent))
+			sb.WriteString(fmt.Sprintf("WAN IP: %s | Gateway: %s", network.WAN.IP, network.WAN.Gateway))
+			if network.Performance.CPUPercent != nil {
+				sb.WriteString(fmt.Sprintf(" | CPU: %.0f%%", *network.Performance.CPUPercent))
 			}
-			if net.Performance.MemPercent != nil {
-				sb.WriteString(fmt.Sprintf(" | Memory: %.0f%%", *net.Performance.MemPercent))
+			if network.Performance.MemPercent != nil {
+				sb.WriteString(fmt.Sprintf(" | Memory: %.0f%%", *network.Performance.MemPercent))
 			}
 			sb.WriteString("\n")
 		}
 
 		// Mesh
-		if mesh, err := client.GetMesh(); err == nil && mesh != nil {
+		if mesh != nil {
 			sb.WriteString(fmt.Sprintf("\n=== MESH NODES (%d) ===\n", mesh.Count))
 			for _, d := range mesh.Devices {
 				sb.WriteString(fmt.Sprintf("%s (%s) - %s - %s - %s\n",
@@ -238,7 +254,7 @@ func gatherNetworkContext(compact bool, db *sql.DB) (string, networkSnapshot) {
 		}
 
 		// Wireless
-		if wifi, err := client.GetWireless(); err == nil && wifi != nil {
+		if wifi != nil {
 			sb.WriteString("\n=== WIRELESS ===\n")
 			bandNames := make([]string, 0, len(wifi.Bands))
 			for k := range wifi.Bands {
@@ -854,6 +870,13 @@ func parseNetworkSnapshot(prompt string) networkSnapshot {
 	return snap
 }
 
+// wanIPChanged reports whether the WAN IP has changed between two snapshots.
+// It returns false if either value is empty (unknown), avoiding false positives
+// when live data is temporarily unavailable.
+func wanIPChanged(oldIP, newIP string) bool {
+	return oldIP != "" && newIP != "" && oldIP != newIP
+}
+
 // diffNetworkSnapshots compares two snapshots and returns a human-readable diff.
 func diffNetworkSnapshots(old, new networkSnapshot) string {
 	var sb strings.Builder
@@ -886,7 +909,7 @@ func diffNetworkSnapshots(old, new networkSnapshot) string {
 	}
 
 	// WAN IP change
-	if old.WANIP != "" && new.WANIP != "" && old.WANIP != new.WANIP {
+	if wanIPChanged(old.WANIP, new.WANIP) {
 		sb.WriteString(fmt.Sprintf("WAN IP: %s → %s\n", old.WANIP, new.WANIP))
 	}
 

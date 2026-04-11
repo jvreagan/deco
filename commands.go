@@ -142,6 +142,8 @@ func runClients(jsonOut bool, nameFilter, macFilter string) error {
 }
 
 // pollLoopConfig defines the behavior of a shared polling loop.
+// The Client and DB fields are populated by pollLoop before setup/work are called,
+// so work closures can capture the config and access them directly.
 type pollLoopConfig struct {
 	interval       int
 	label          string // "Poll", "Monitor", "Watch"
@@ -150,12 +152,18 @@ type pollLoopConfig struct {
 	maxFailures    int             // if 0, defaults to maxConsecutiveFailures (10)
 	configOverride *Config         // if set, skip loadConfig/validateConfig
 	setup          func(db *sql.DB, size int64) // optional, called once before the loop
-	work           func(ctx context.Context, client *DecoClient, db *sql.DB, cycle int) error
+	work           func(cycle int) error
+
+	// Populated by pollLoop — available for use in setup and work closures.
+	Client *DecoClient
+	DB     *sql.DB
 }
 
 // pollLoop runs a polling loop with shared infrastructure: config loading,
 // signal handling, client creation, auth with backoff, and DB management.
-func pollLoop(cfg pollLoopConfig) error {
+// It populates cfg.Client and cfg.DB before calling setup/work, so callers
+// can capture cfg by pointer and access these fields in their closures.
+func pollLoop(cfg *pollLoopConfig) error {
 	if cfg.interval < 1 {
 		return fmt.Errorf("interval must be at least 1 second, got %d", cfg.interval)
 	}
@@ -174,14 +182,13 @@ func pollLoop(cfg pollLoopConfig) error {
 		}
 	}
 
-	var db *sql.DB
 	if cfg.needsDB {
 		var dbErr error
-		db, dbErr = initDB()
+		cfg.DB, dbErr = initDB()
 		if dbErr != nil {
 			return fmt.Errorf("initializing database: %v", dbErr)
 		}
-		defer db.Close()
+		defer cfg.DB.Close()
 
 		ok, size := checkDBSizeLimit()
 		if !ok {
@@ -189,7 +196,7 @@ func pollLoop(cfg pollLoopConfig) error {
 			return fmt.Errorf("database size limit exceeded")
 		}
 		if cfg.setup != nil {
-			cfg.setup(db, size)
+			cfg.setup(cfg.DB, size)
 		}
 	} else if cfg.setup != nil {
 		cfg.setup(nil, 0)
@@ -205,8 +212,8 @@ func pollLoop(cfg pollLoopConfig) error {
 	}
 	defer cancel()
 
-	client := NewDecoClient(config.Host, config.Password)
-	defer client.Logout()
+	cfg.Client = NewDecoClient(config.Host, config.Password)
+	defer cfg.Client.Logout()
 
 	maxFail := maxConsecutiveFailures
 	if cfg.maxFailures > 0 {
@@ -239,12 +246,12 @@ func pollLoop(cfg pollLoopConfig) error {
 				printDBLimitError(size, cfg.label)
 				return fmt.Errorf("database size limit exceeded")
 			}
-			checkDBCapacity(db)
+			checkDBCapacity(cfg.DB)
 		}
 
 		start := time.Now()
 
-		if err := client.EnsureAuthorized(); err != nil {
+		if err := cfg.Client.EnsureAuthorized(); err != nil {
 			consecutiveFailures++
 			totalFailures++
 			if consecutiveFailures >= maxFail {
@@ -262,8 +269,8 @@ func pollLoop(cfg pollLoopConfig) error {
 			continue
 		}
 
-		if err := cfg.work(ctx, client, db, cycle); err != nil {
-			client.Invalidate()
+		if err := cfg.work(cycle); err != nil {
+			cfg.Client.Invalidate()
 			consecutiveFailures++
 			totalFailures++
 			if consecutiveFailures >= maxFail {
@@ -298,25 +305,26 @@ func pollLoop(cfg pollLoopConfig) error {
 }
 
 func runWatch(interval int, nameFilter, macFilter string, maxFailures int) error {
-	return pollLoop(pollLoopConfig{
+	cfg := &pollLoopConfig{
 		interval:    interval,
 		label:       "Watch",
 		needsDB:     false,
 		maxFailures: maxFailures,
-		work: func(ctx context.Context, client *DecoClient, db *sql.DB, cycle int) error {
-			data, err := client.GetClients()
-			if err != nil {
-				return err
-			}
-			if nameFilter != "" || macFilter != "" {
-				data = filterClients(data, nameFilter, macFilter)
-			}
-			fmt.Print("\033[2J\033[H")
-			fmt.Printf("Watching clients (every %ds) — %s — Press Ctrl+C to stop\n", interval, time.Now().Format("15:04:05"))
-			printClientsTable(data)
-			return nil
-		},
-	})
+	}
+	cfg.work = func(cycle int) error {
+		data, err := cfg.Client.GetClients()
+		if err != nil {
+			return err
+		}
+		if nameFilter != "" || macFilter != "" {
+			data = filterClients(data, nameFilter, macFilter)
+		}
+		fmt.Print("\033[2J\033[H")
+		fmt.Printf("Watching clients (every %ds) — %s — Press Ctrl+C to stop\n", interval, time.Now().Format("15:04:05"))
+		printClientsTable(data)
+		return nil
+	}
+	return pollLoop(cfg)
 }
 
 func runNetwork(jsonOut bool) error {
@@ -439,7 +447,7 @@ func runAPI(endpoint, body string) error {
 }
 
 func runPoll(interval int, maxFailures int) error {
-	return pollLoop(pollLoopConfig{
+	cfg := &pollLoopConfig{
 		interval:    interval,
 		label:       "Poll",
 		needsDB:     true,
@@ -450,29 +458,30 @@ func runPoll(interval int, maxFailures int) error {
 			fmt.Printf("DB Size:  %s / %s limit\n", formatSize(size), formatSize(DBSizeLimitBytes))
 			fmt.Println("Press Ctrl+C to stop")
 		},
-		work: func(ctx context.Context, client *DecoClient, db *sql.DB, cycle int) error {
-			data, err := client.GetClients()
-			if err != nil {
-				return err
+	}
+	cfg.work = func(cycle int) error {
+		data, err := cfg.Client.GetClients()
+		if err != nil {
+			return err
+		}
+
+		storeBandwidthSamples(cfg.DB, data, time.Now().Format(time.RFC3339))
+
+		activeCount := 0
+		var totalDown, totalUp int64
+		for _, c := range data.Clients {
+			if c.DownloadKbps > 0 || c.UploadKbps > 0 {
+				activeCount++
 			}
+			totalDown += int64(c.DownloadKbps)
+			totalUp += int64(c.UploadKbps)
+		}
 
-			storeBandwidthSamples(db, data, time.Now().Format(time.RFC3339))
-
-			activeCount := 0
-			var totalDown, totalUp int64
-			for _, c := range data.Clients {
-				if c.DownloadKbps > 0 || c.UploadKbps > 0 {
-					activeCount++
-				}
-				totalDown += int64(c.DownloadKbps)
-				totalUp += int64(c.UploadKbps)
-			}
-
-			logInfo("[%s] Sample #%d: %d clients, %d active, %d KB/s down %d KB/s up",
-				time.Now().Format("15:04:05"), cycle+1, len(data.Clients), activeCount, totalDown, totalUp)
-			return nil
-		},
-	})
+		logInfo("[%s] Sample #%d: %d clients, %d active, %d KB/s down %d KB/s up",
+			time.Now().Format("15:04:05"), cycle+1, len(data.Clients), activeCount, totalDown, totalUp)
+		return nil
+	}
+	return pollLoop(cfg)
 }
 
 // storeBandwidthSamples inserts bandwidth samples for all connected clients into the database.
@@ -543,7 +552,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 	var knownMACs map[string]bool
 	var aliases map[string]string
 
-	return pollLoop(pollLoopConfig{
+	cfg := &pollLoopConfig{
 		interval:    interval,
 		label:       "Monitor",
 		needsDB:     true,
@@ -565,91 +574,95 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 			}
 			fmt.Println("Press Ctrl+C to stop")
 		},
-		work: func(ctx context.Context, client *DecoClient, db *sql.DB, cycle int) error {
-			clientData, clientErr := client.GetClients()
-			networkData, networkErr := client.GetNetwork()
-			wirelessData, wirelessErr := client.GetWireless()
-			meshData, meshErr := client.GetMesh()
+	}
+	cfg.work = func(cycle int) error {
+		client := cfg.Client
+		db := cfg.DB
 
-			// If all requests failed, session is probably dead
-			if clientErr != nil && networkErr != nil && wirelessErr != nil && meshErr != nil {
-				return fmt.Errorf("all requests failed")
-			}
+		clientData, clientErr := client.GetClients()
+		networkData, networkErr := client.GetNetwork()
+		wirelessData, wirelessErr := client.GetWireless()
+		meshData, meshErr := client.GetMesh()
 
-			timestamp := time.Now().Format(time.RFC3339)
-			ts := time.Now().Format("15:04:05")
+		// If all requests failed, session is probably dead
+		if clientErr != nil && networkErr != nil && wirelessErr != nil && meshErr != nil {
+			return fmt.Errorf("all requests failed")
+		}
 
-			clientCount := 0
-			if clientErr == nil {
-				clientCount = len(clientData.Clients)
-				storeBandwidthSamples(db, clientData, timestamp)
-				for _, c := range clientData.Clients {
-					if notify && knownMACs != nil {
-						macUpper := strings.ToUpper(c.MAC)
-						if !knownMACs[macUpper] {
-							notifyNewMAC(c.MAC, c.Name, c.IP, webhookURL)
-							knownMACs[macUpper] = true
-						}
-					}
-					if alertThreshold > 0 {
-						rate := c.DownloadKbps + c.UploadKbps
-						if rate > alertThreshold {
-							name := c.Name
-							if alias, ok := aliases[strings.ToUpper(c.MAC)]; ok {
-								name = alias
-							}
-							fmt.Printf("[%s] ALERT: %s — %dKB/s (threshold: %dKB/s)\n",
-								ts, name, rate, alertThreshold)
-							sendWebhook(webhookURL, WebhookPayload{
-								Event:     "bandwidth_alert",
-								Timestamp: time.Now().Format(time.RFC3339),
-								Text:      fmt.Sprintf("ALERT: %s — %dKB/s (threshold: %dKB/s)", name, rate, alertThreshold),
-								Data:      BandwidthAlertEvent{MAC: c.MAC, Name: name, RateKBps: rate, Threshold: alertThreshold},
-							})
-						}
+		timestamp := time.Now().Format(time.RFC3339)
+		ts := time.Now().Format("15:04:05")
+
+		clientCount := 0
+		if clientErr == nil {
+			clientCount = len(clientData.Clients)
+			storeBandwidthSamples(db, clientData, timestamp)
+			for _, c := range clientData.Clients {
+				if notify && knownMACs != nil {
+					macUpper := strings.ToUpper(c.MAC)
+					if !knownMACs[macUpper] {
+						notifyNewMAC(c.MAC, c.Name, c.IP, webhookURL)
+						knownMACs[macUpper] = true
 					}
 				}
-			} else {
-				logInfo("[%s] Error getting clients: %v", ts, clientErr)
+				if alertThreshold > 0 {
+					rate := c.DownloadKbps + c.UploadKbps
+					if rate > alertThreshold {
+						name := c.Name
+						if alias, ok := aliases[strings.ToUpper(c.MAC)]; ok {
+							name = alias
+						}
+						fmt.Printf("[%s] ALERT: %s — %dKB/s (threshold: %dKB/s)\n",
+							ts, name, rate, alertThreshold)
+						sendWebhook(webhookURL, WebhookPayload{
+							Event:     "bandwidth_alert",
+							Timestamp: time.Now().Format(time.RFC3339),
+							Text:      fmt.Sprintf("ALERT: %s — %dKB/s (threshold: %dKB/s)", name, rate, alertThreshold),
+							Data:      BandwidthAlertEvent{MAC: c.MAC, Name: name, RateKBps: rate, Threshold: alertThreshold},
+						})
+					}
+				}
 			}
+		} else {
+			logInfo("[%s] Error getting clients: %v", ts, clientErr)
+		}
 
-			var cpuPct, memPct *float64
-			if networkErr == nil {
-				cpuPct = networkData.Performance.CPUPercent
-				memPct = networkData.Performance.MemPercent
-				storeNetworkSnapshot(db, networkData, timestamp)
-			} else {
-				logInfo("[%s] Error getting network: %v", ts, networkErr)
-			}
+		var cpuPct, memPct *float64
+		if networkErr == nil {
+			cpuPct = networkData.Performance.CPUPercent
+			memPct = networkData.Performance.MemPercent
+			storeNetworkSnapshot(db, networkData, timestamp)
+		} else {
+			logInfo("[%s] Error getting network: %v", ts, networkErr)
+		}
 
-			meshCount := 0
-			if meshErr == nil {
-				meshCount = len(meshData.Devices)
-				storeMeshSnapshot(db, meshData, timestamp)
-			} else {
-				logInfo("[%s] Error getting mesh: %v", ts, meshErr)
-			}
+		meshCount := 0
+		if meshErr == nil {
+			meshCount = len(meshData.Devices)
+			storeMeshSnapshot(db, meshData, timestamp)
+		} else {
+			logInfo("[%s] Error getting mesh: %v", ts, meshErr)
+		}
 
-			if wirelessErr == nil {
-				storeWirelessSnapshot(db, wirelessData, timestamp)
-			} else {
-				logInfo("[%s] Error getting wireless: %v", ts, wirelessErr)
-			}
+		if wirelessErr == nil {
+			storeWirelessSnapshot(db, wirelessData, timestamp)
+		} else {
+			logInfo("[%s] Error getting wireless: %v", ts, wirelessErr)
+		}
 
-			cpuStr := "?"
-			memStr := "?"
-			if cpuPct != nil {
-				cpuStr = fmt.Sprintf("%.0f%%", *cpuPct)
-			}
-			if memPct != nil {
-				memStr = fmt.Sprintf("%.0f%%", *memPct)
-			}
+		cpuStr := "?"
+		memStr := "?"
+		if cpuPct != nil {
+			cpuStr = fmt.Sprintf("%.0f%%", *cpuPct)
+		}
+		if memPct != nil {
+			memStr = fmt.Sprintf("%.0f%%", *memPct)
+		}
 
-			logInfo("[%s] Cycle #%d: %d clients, CPU %s, Mem %s, %d mesh nodes",
-				ts, cycle+1, clientCount, cpuStr, memStr, meshCount)
-			return nil
-		},
-	})
+		logInfo("[%s] Cycle #%d: %d clients, CPU %s, Mem %s, %d mesh nodes",
+			ts, cycle+1, clientCount, cpuStr, memStr, meshCount)
+		return nil
+	}
+	return pollLoop(cfg)
 }
 
 func loadKnownMACs(db *sql.DB) map[string]bool {

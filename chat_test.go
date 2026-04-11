@@ -1129,6 +1129,30 @@ func TestDiffNetworkSnapshotsNoChange(t *testing.T) {
 	}
 }
 
+// ==================== WAN IP CHANGED HELPER TESTS ====================
+
+func TestWanIPChanged(t *testing.T) {
+	tests := []struct {
+		name     string
+		oldIP    string
+		newIP    string
+		expected bool
+	}{
+		{"different IPs", "1.2.3.4", "5.6.7.8", true},
+		{"same IP", "1.2.3.4", "1.2.3.4", false},
+		{"old empty", "", "5.6.7.8", false},
+		{"new empty", "1.2.3.4", "", false},
+		{"both empty", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := wanIPChanged(tt.oldIP, tt.newIP); got != tt.expected {
+				t.Errorf("wanIPChanged(%q, %q) = %v, want %v", tt.oldIP, tt.newIP, got, tt.expected)
+			}
+		})
+	}
+}
+
 // ==================== RESOLVE MODEL TESTS ====================
 
 func TestResolveModelFound(t *testing.T) {

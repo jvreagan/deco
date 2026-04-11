@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -298,14 +300,12 @@ func TestBackoff(t *testing.T) {
 // testEnv sets up an isolated config environment for a test.
 // It points XDG_CONFIG_HOME at a temp dir and re-derives dbPath.
 //
-// LIMITATION: This function calls setDBPath which mutates the package-level
-// dbPath variable. Because of this (and other package-level state such as
-// the initDB schema-version cache), tests that call testEnv or setupTestDB
-// must NOT use t.Parallel(). Restructuring to pass a DB path through the
-// call chain would be the proper fix but is a large cross-cutting change.
-//
-// t.Cleanup restores the original dbPath so that tests run in sequence do
-// not leak state from one test into the next.
+// Safety (#85): t.Cleanup restores the original dbPath after the test
+// completes, so sequential tests do not leak state. However, because
+// setDBPath mutates a package-level variable, tests that call testEnv or
+// setupTestDB must NOT use t.Parallel() — two concurrent tests would race
+// on the global. Restructuring to pass a DB path through the call chain
+// would eliminate this restriction but is a large cross-cutting change.
 func testEnv(t *testing.T) string {
 	t.Helper()
 	origDBPath := dbPath
@@ -326,6 +326,11 @@ func testEnv(t *testing.T) string {
 // io.Writer parameter instead of writing directly to os.Stdout. That change
 // is large but would make the tests safer and more composable.
 
+// setupTestDB creates an isolated test database in a temp directory.
+// It delegates to testEnv which saves and restores the global dbPath via
+// t.Cleanup (#85), so each test gets its own DB file and the global is
+// reset when the test finishes. The returned *sql.DB is also closed
+// automatically via t.Cleanup.
 func setupTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	testEnv(t)
@@ -1216,8 +1221,78 @@ func TestLoadKnownMACs(t *testing.T) {
 }
 
 func TestNotifyNewMAC(t *testing.T) {
-	// Just verify it doesn't panic
-	notifyNewMAC("AA-BB-CC-DD-EE-FF", "TestDevice", "192.168.68.100", "")
+	t.Run("no webhook URL does not panic", func(t *testing.T) {
+		// With an empty webhook URL, notifyNewMAC should complete without error.
+		notifyNewMAC("AA-BB-CC-DD-EE-FF", "TestDevice", "192.168.68.100", "")
+	})
+
+	t.Run("sends webhook with expected payload", func(t *testing.T) {
+		var (
+			mu          sync.Mutex
+			gotRequest  bool
+			gotBody     []byte
+			gotCType    string
+		)
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			gotRequest = true
+			gotCType = r.Header.Get("Content-Type")
+			gotBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		notifyNewMAC("AA-BB-CC-DD-EE-FF", "TestDevice", "192.168.68.100", srv.URL)
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if !gotRequest {
+			t.Fatal("webhook server did not receive a request")
+		}
+
+		if gotCType != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", gotCType)
+		}
+
+		var payload struct {
+			Event     string `json:"event"`
+			Timestamp string `json:"timestamp"`
+			Text      string `json:"text"`
+			Data      struct {
+				MAC  string `json:"mac"`
+				Name string `json:"name"`
+				IP   string `json:"ip"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(gotBody, &payload); err != nil {
+			t.Fatalf("failed to unmarshal webhook body: %v", err)
+		}
+
+		if payload.Event != "new_device" {
+			t.Errorf("event = %q, want new_device", payload.Event)
+		}
+		if payload.Timestamp == "" {
+			t.Error("timestamp should not be empty")
+		}
+		if !strings.Contains(payload.Text, "AA-BB-CC-DD-EE-FF") {
+			t.Errorf("text should contain MAC address, got %q", payload.Text)
+		}
+		if !strings.Contains(payload.Text, "TestDevice") {
+			t.Errorf("text should contain device name, got %q", payload.Text)
+		}
+		if payload.Data.MAC != "AA-BB-CC-DD-EE-FF" {
+			t.Errorf("data.mac = %q, want AA-BB-CC-DD-EE-FF", payload.Data.MAC)
+		}
+		if payload.Data.Name != "TestDevice" {
+			t.Errorf("data.name = %q, want TestDevice", payload.Data.Name)
+		}
+		if payload.Data.IP != "192.168.68.100" {
+			t.Errorf("data.ip = %q, want 192.168.68.100", payload.Data.IP)
+		}
+	})
 }
 
 // ==================== REPORT NETWORK/MESH TESTS ====================
@@ -1478,14 +1553,14 @@ func TestPollLoopShutdownOnCancel(t *testing.T) {
 
 	// Auth will fail (login response not properly encrypted), which is fine —
 	// we're testing that context cancellation causes a clean return.
-	err := pollLoop(pollLoopConfig{
+	err := pollLoop(&pollLoopConfig{
 		interval:       1,
 		label:          "Test",
 		needsDB:        false,
 		ctx:            ctx,
 		maxFailures:    100, // high so we don't exit due to failures
 		configOverride: config,
-		work: func(ctx context.Context, client *DecoClient, db *sql.DB, cycle int) error {
+		work: func(cycle int) error {
 			return nil
 		},
 	})
@@ -1523,14 +1598,14 @@ func TestPollLoopMaxFailures(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	err := pollLoop(pollLoopConfig{
+	err := pollLoop(&pollLoopConfig{
 		interval:       1,
 		label:          "Test",
 		needsDB:        false,
 		ctx:            ctx,
 		maxFailures:    2,
 		configOverride: config,
-		work: func(ctx context.Context, client *DecoClient, db *sql.DB, cycle int) error {
+		work: func(cycle int) error {
 			return fmt.Errorf("deliberate failure")
 		},
 	})
