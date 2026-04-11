@@ -436,11 +436,7 @@ Requires Ollama running locally (ollama serve). Set OLLAMA_HOST to override URL.
 			showContext, _ := cmd.Flags().GetBool("show-context")
 
 			// Resolve OLLAMA_HOST early for --list-models
-			if url == "http://localhost:11434" {
-				if host := os.Getenv("OLLAMA_HOST"); host != "" {
-					url = host
-				}
-			}
+			url = resolveOllamaURL(url)
 
 			if listModels {
 				return listOllamaModels(url)

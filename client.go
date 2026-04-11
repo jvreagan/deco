@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
@@ -19,15 +20,19 @@ import (
 	"time"
 )
 
+const maxResponseSize = 10 * 1024 * 1024 // 10 MB
+
 // Config holds router credentials
 type Config struct {
 	Host     string `json:"host"`
 	Password string `json:"password"`
 }
 
+// sessionTimeout is the max age of an auth session before re-authentication.
+// The Deco router firmware typically expires sessions after 5 minutes.
 const sessionTimeout = 5 * time.Minute
 
-// DecoClient handles API communication
+// DecoClient is not safe for concurrent use. Create separate instances for concurrent operations.
 type DecoClient struct {
 	host         string
 	password     string
@@ -154,7 +159,7 @@ func (dc *DecoClient) getPasswordKeys() error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return fmt.Errorf("failed to read password keys response: %v", err)
 	}
@@ -189,7 +194,7 @@ func (dc *DecoClient) getAuthKeys() error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return fmt.Errorf("failed to read auth keys response: %v", err)
 	}
@@ -290,7 +295,7 @@ func (dc *DecoClient) Authorize() error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return fmt.Errorf("failed to read login response: %v", err)
 	}
@@ -394,7 +399,7 @@ func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %v", err)
 	}
@@ -483,7 +488,8 @@ func (dc *DecoClient) Logout() {
 func (dc *DecoClient) GetClients() (*ClientList, error) {
 	data, err := dc.Request("admin/client?form=client_list", map[string]interface{}{
 		"operation": "read",
-		"params":    map[string]string{"device_mac": "default"},
+		// "default" is the Deco API convention meaning "all devices" (not a specific MAC).
+		"params": map[string]string{"device_mac": "default"},
 	})
 	if err != nil {
 		return nil, err
@@ -537,9 +543,14 @@ func (dc *DecoClient) GetClients() (*ClientList, error) {
 		}
 	}
 
-	// Sort by IP
+	// Sort by IP (numerically)
 	sort.Slice(clients, func(i, j int) bool {
-		return clients[i].IP < clients[j].IP
+		ipA := net.ParseIP(clients[i].IP)
+		ipB := net.ParseIP(clients[j].IP)
+		if ipA == nil || ipB == nil {
+			return clients[i].IP < clients[j].IP
+		}
+		return bytes.Compare(ipA, ipB) < 0
 	})
 
 	return &ClientList{
@@ -554,7 +565,10 @@ func (dc *DecoClient) GetNetwork() (*NetworkInfo, error) {
 		return nil, err
 	}
 
-	perf, _ := dc.Request("admin/network?form=performance", map[string]interface{}{"operation": "read"})
+	perf, perfErr := dc.Request("admin/network?form=performance", map[string]interface{}{"operation": "read"})
+	if perfErr != nil {
+		logDebug("performance query failed: %v", perfErr)
+	}
 
 	wan := getMap(data, "wan")
 	lan := getMap(data, "lan")

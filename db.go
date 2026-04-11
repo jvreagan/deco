@@ -11,7 +11,7 @@ import (
 
 // Database constants
 const (
-	DBSizeLimitBytes = 250 * 1024 * 1024 * 1024 // 250 GB
+	DBSizeLimitBytes = 1 * 1024 * 1024 * 1024 // 1 GB
 )
 
 var dbPath string
@@ -94,6 +94,8 @@ func initDB() (*sql.DB, error) {
 			guest_ssid TEXT
 		);
 		CREATE INDEX IF NOT EXISTS idx_wireless_timestamp ON wireless_snapshots(timestamp);
+
+		CREATE INDEX IF NOT EXISTS idx_bandwidth_mac_ts ON bandwidth_samples(mac, timestamp);
 	`)
 	if err != nil {
 		return nil, err
@@ -137,5 +139,6 @@ func pruneOlderThan(db *sql.DB, days int) error {
 			return fmt.Errorf("failed to prune %s: %v", table, err)
 		}
 	}
+	db.Exec("VACUUM")
 	return nil
 }

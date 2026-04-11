@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -156,8 +157,8 @@ func TestRSAEncryptMultiChunk(t *testing.T) {
 		t.Fatalf("failed to generate RSA key: %v", err)
 	}
 
-	// Data longer than 53 bytes to force multi-chunk
-	longData := "k=abcdef0123456789&i=fedcba9876543210&h=0123456789abcdef0123456789abcdef&s=12345"
+	// Data longer than modSize-11 (245 bytes for 2048-bit key) to force multi-chunk
+	longData := strings.Repeat("abcdefghijklmnopqrstuvwxyz0123456789", 8) // 280 bytes
 	encrypted, err := rsaEncrypt(longData, privKey.PublicKey.N, privKey.PublicKey.E)
 	if err != nil {
 		t.Fatalf("rsaEncrypt failed: %v", err)

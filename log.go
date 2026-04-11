@@ -35,5 +35,5 @@ func logAt(level LogLevel, prefix, format string, args ...interface{}) {
 		return
 	}
 	msg := fmt.Sprintf(format, args...)
-	fmt.Fprintf(os.Stderr, "%s [%s] %s\n", time.Now().Format("15:04:05"), prefix, msg)
+	fmt.Fprintf(os.Stderr, "%s [%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), prefix, msg)
 }

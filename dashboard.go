@@ -16,6 +16,8 @@ type activityEntry struct {
 }
 
 // dashboardModel is the bubbletea model for the live dashboard.
+// The host and password fields are immutable after initialization and safe to
+// read from goroutines (e.g., fetchData commands).
 type dashboardModel struct {
 	clients    *ClientList
 	network    *NetworkInfo
@@ -24,8 +26,8 @@ type dashboardModel struct {
 	activity   []activityEntry
 	lastUpdate time.Time
 	err        error
-	host       string
-	password   string
+	host       string   // immutable after init; read by fetchData goroutines
+	password   string   // immutable after init; read by fetchData goroutines
 	interval   int
 	width      int
 	height     int

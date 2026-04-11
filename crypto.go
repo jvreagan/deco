@@ -142,7 +142,7 @@ func rsaEncryptPKCS1(data []byte, n *big.Int, e int) ([]byte, error) {
 
 func rsaEncrypt(data string, n *big.Int, e int) (string, error) {
 	modSize := (n.BitLen() + 7) / 8
-	step := 53 // Python uses 53 byte chunks
+	step := modSize - 11 // PKCS#1 v1.5 overhead is 11 bytes
 
 	var result strings.Builder
 	for i := 0; i < len(data); i += step {

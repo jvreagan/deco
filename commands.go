@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"syscall"
@@ -75,6 +77,10 @@ func runSetup() error {
 
 func runVersion() {
 	fmt.Println(version)
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		fmt.Printf("go: %s\n", bi.GoVersion)
+	}
+	fmt.Printf("os/arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 }
 
 func connectClient() (*DecoClient, *Config, error) {
@@ -610,9 +616,15 @@ func loadKnownMACs(db *sql.DB) map[string]bool {
 	return known
 }
 
+var webhookClient = &http.Client{Timeout: 10 * time.Second}
+
 func sendWebhook(webhookURL string, payload WebhookPayload) {
 	if webhookURL == "" {
 		return
+	}
+
+	if strings.HasPrefix(webhookURL, "http://") {
+		logWarn("webhook URL uses plain HTTP (not HTTPS): %s", webhookURL)
 	}
 
 	body, err := json.Marshal(payload)
@@ -621,8 +633,7 @@ func sendWebhook(webhookURL string, payload WebhookPayload) {
 		return
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(webhookURL, "application/json", bytes.NewReader(body))
+	resp, err := webhookClient.Post(webhookURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		logWarn("webhook POST error: %v", err)
 		return
@@ -666,9 +677,11 @@ func resolveDeviceMAC(db *sql.DB, identifier string) (string, error) {
 	}
 
 	// Search bandwidth_samples name field (LIKE)
+	escaped := strings.ReplaceAll(strings.ReplaceAll(identifier, "!", "!!"), "%", "!%")
+	escaped = strings.ReplaceAll(escaped, "_", "!_")
 	var mac string
-	err := db.QueryRow(`SELECT mac FROM bandwidth_samples WHERE LOWER(name) LIKE ? LIMIT 1`,
-		"%"+strings.ToLower(identifier)+"%").Scan(&mac)
+	err := db.QueryRow(`SELECT mac FROM bandwidth_samples WHERE LOWER(name) LIKE ? ESCAPE '!' LIMIT 1`,
+		"%"+strings.ToLower(escaped)+"%").Scan(&mac)
 	if err == nil {
 		return strings.ToUpper(mac), nil
 	}
@@ -1170,9 +1183,13 @@ func runPurge(force bool, beforeStr string, days int) {
 			}
 		}
 
-		purgeByDate(db, cutoff)
+		deleted, err := purgeByDate(db, cutoff)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error during purge: %v\n", err)
+			return
+		}
 
-		fmt.Printf("Purged %d records older than %s\n", count, cutoff.Format("2006-01-02"))
+		fmt.Printf("Purged %d records older than %s\n", deleted, cutoff.Format("2006-01-02"))
 		fmt.Printf("Database size after purge: %s\n", formatSize(getDBSize()))
 		return
 	}
@@ -1268,6 +1285,7 @@ func runBlock(mac string) error {
 	if !validMAC(mac) {
 		return fmt.Errorf("invalid MAC address %q", mac)
 	}
+	mac = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(mac, ":", "-"), ".", "-"))
 
 	client, _, err := connectClient()
 	if err != nil {
@@ -1287,6 +1305,7 @@ func runUnblock(mac string) error {
 	if !validMAC(mac) {
 		return fmt.Errorf("invalid MAC address %q", mac)
 	}
+	mac = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(mac, ":", "-"), ".", "-"))
 
 	client, _, err := connectClient()
 	if err != nil {
@@ -1317,7 +1336,9 @@ func runAlias(remove bool, args []string) error {
 			return fmt.Errorf("no alias found for %s", mac)
 		}
 		delete(aliases, mac)
-		saveAliases(aliases)
+		if err := saveAliases(aliases); err != nil {
+			return err
+		}
 		fmt.Printf("Removed alias for %s\n", mac)
 		return nil
 	}
@@ -1354,7 +1375,9 @@ func runAlias(remove bool, args []string) error {
 	name := strings.Join(args[1:], " ")
 
 	aliases[mac] = name
-	saveAliases(aliases)
+	if err := saveAliases(aliases); err != nil {
+		return err
+	}
 	fmt.Printf("Set alias: %s -> %s\n", mac, name)
 	return nil
 }
@@ -1367,15 +1390,15 @@ func loadTags() map[string][]string {
 
 	var tags map[string][]string
 	if err := json.Unmarshal(data, &tags); err != nil {
+		logWarn("corrupt %s file, ignoring: %v", "deco_tags.json", err)
 		return map[string][]string{}
 	}
 	return tags
 }
 
-func saveTags(tags map[string][]string) {
+func saveTags(tags map[string][]string) error {
 	if err := ensureConfigDir(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating config dir: %v\n", err)
-		return
+		return fmt.Errorf("creating config dir: %v", err)
 	}
 
 	// Clean up empty tag lists
@@ -1387,13 +1410,13 @@ func saveTags(tags map[string][]string) {
 
 	data, err := json.MarshalIndent(tags, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error saving tags: %v\n", err)
-		return
+		return fmt.Errorf("saving tags: %v", err)
 	}
 
 	if err := os.WriteFile(cfgPath("deco_tags.json"), data, 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "Error saving tags: %v\n", err)
+		return fmt.Errorf("saving tags: %v", err)
 	}
+	return nil
 }
 
 func runAliasTag(args []string) error {
@@ -1411,7 +1434,9 @@ func runAliasTag(args []string) error {
 		}
 	}
 	tags[mac] = append(tags[mac], tag)
-	saveTags(tags)
+	if err := saveTags(tags); err != nil {
+		return err
+	}
 	fmt.Printf("Tagged %s with %q\n", mac, tag)
 	return nil
 }
@@ -1437,7 +1462,9 @@ func runAliasUntag(args []string) error {
 		return fmt.Errorf("%s does not have tag %q", mac, tag)
 	}
 	tags[mac] = newTags
-	saveTags(tags)
+	if err := saveTags(tags); err != nil {
+		return err
+	}
 	fmt.Printf("Removed tag %q from %s\n", tag, mac)
 	return nil
 }
@@ -1487,26 +1514,26 @@ func loadAliases() map[string]string {
 
 	var aliases map[string]string
 	if err := json.Unmarshal(data, &aliases); err != nil {
+		logWarn("corrupt %s file, ignoring: %v", "deco_aliases.json", err)
 		return map[string]string{}
 	}
 	return aliases
 }
 
-func saveAliases(aliases map[string]string) {
+func saveAliases(aliases map[string]string) error {
 	if err := ensureConfigDir(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error creating config dir: %v\n", err)
-		return
+		return fmt.Errorf("creating config dir: %v", err)
 	}
 
 	data, err := json.MarshalIndent(aliases, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error saving aliases: %v\n", err)
-		return
+		return fmt.Errorf("saving aliases: %v", err)
 	}
 
 	if err := os.WriteFile(cfgPath("deco_aliases.json"), data, 0600); err != nil {
-		fmt.Fprintf(os.Stderr, "Error saving aliases: %v\n", err)
+		return fmt.Errorf("saving aliases: %v", err)
 	}
+	return nil
 }
 
 func filterClients(data *ClientList, nameFilter, macFilter string) *ClientList {

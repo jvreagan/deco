@@ -513,14 +513,20 @@ func streamOllamaChat(ollamaURL string, req ollamaChatRequest, w io.Writer) (str
 	return full.String(), nil
 }
 
-// runChat is the main entry point for the chat command.
-func runChat(model, ollamaURL, query string, compact, showContext bool) error {
-	// Resolve OLLAMA_HOST env var as fallback
-	if ollamaURL == "http://localhost:11434" {
+// resolveOllamaURL returns the effective Ollama URL, preferring the OLLAMA_HOST
+// environment variable when the flag value is the default localhost URL.
+func resolveOllamaURL(flagURL string) string {
+	if flagURL == "http://localhost:11434" {
 		if host := os.Getenv("OLLAMA_HOST"); host != "" {
-			ollamaURL = host
+			return host
 		}
 	}
+	return flagURL
+}
+
+// runChat is the main entry point for the chat command.
+func runChat(model, ollamaURL, query string, compact, showContext bool) error {
+	ollamaURL = resolveOllamaURL(ollamaURL)
 
 	if err := checkOllama(ollamaURL); err != nil {
 		return err
