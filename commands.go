@@ -212,12 +212,20 @@ func pollLoop(cfg pollLoopConfig) error {
 
 	cycle := 0
 	consecutiveFailures := 0
+	totalFailures := 0
 	baseDuration := time.Duration(cfg.interval) * time.Second
+	loopStart := time.Now()
+
+	printSummary := func() {
+		elapsed := time.Since(loopStart).Truncate(time.Second)
+		fmt.Printf("\n%s stopped. Completed %d cycles (%d failures) in %s.\n",
+			cfg.label, cycle, totalFailures, elapsed)
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("\n%s stopped. Completed %d cycles.\n", cfg.label, cycle)
+			printSummary()
 			return nil
 		default:
 		}
@@ -235,14 +243,16 @@ func pollLoop(cfg pollLoopConfig) error {
 
 		if err := client.EnsureAuthorized(); err != nil {
 			consecutiveFailures++
+			totalFailures++
 			if consecutiveFailures >= maxFail {
+				printSummary()
 				return fmt.Errorf("%d consecutive failures, giving up", consecutiveFailures)
 			}
 			wait := backoff(consecutiveFailures, baseDuration, 5*time.Minute)
 			fmt.Printf("[%s] Error connecting: %v, retrying in %s...\n", time.Now().Format("15:04:05"), err, wait)
 			select {
 			case <-ctx.Done():
-				fmt.Printf("\n%s stopped. Completed %d cycles.\n", cfg.label, cycle)
+				printSummary()
 				return nil
 			case <-time.After(wait):
 			}
@@ -252,14 +262,16 @@ func pollLoop(cfg pollLoopConfig) error {
 		if err := cfg.work(ctx, client, db, cycle); err != nil {
 			client.Invalidate()
 			consecutiveFailures++
+			totalFailures++
 			if consecutiveFailures >= maxFail {
+				printSummary()
 				return fmt.Errorf("%d consecutive failures, giving up", consecutiveFailures)
 			}
 			wait := backoff(consecutiveFailures, baseDuration, 5*time.Minute)
 			fmt.Printf("[%s] Error: %v, retrying in %s...\n", time.Now().Format("15:04:05"), err, wait)
 			select {
 			case <-ctx.Done():
-				fmt.Printf("\n%s stopped. Completed %d cycles.\n", cfg.label, cycle)
+				printSummary()
 				return nil
 			case <-time.After(wait):
 			}
@@ -274,7 +286,7 @@ func pollLoop(cfg pollLoopConfig) error {
 		if sleepTime > 0 {
 			select {
 			case <-ctx.Done():
-				fmt.Printf("\n%s stopped. Completed %d cycles.\n", cfg.label, cycle)
+				printSummary()
 				return nil
 			case <-time.After(sleepTime):
 			}
@@ -527,6 +539,10 @@ func storeWirelessSnapshot(db *sql.DB, wireless *WirelessInfo, ts string) {
 	}
 }
 
+// runMonitor starts a full network monitor that polls all data endpoints and stores
+// results in the database. Status output (device counts, cycle summaries) goes to
+// stdout; warnings and errors go to stderr. This is intentional Unix convention:
+// stdout carries the data stream, stderr carries diagnostics.
 func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string, maxFailures int) error {
 	var knownMACs map[string]bool
 	var aliases map[string]string

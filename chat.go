@@ -282,197 +282,229 @@ func gatherNetworkContext(compact bool, db ...*sql.DB) string {
 		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		todayStr := startOfDay.Format(time.RFC3339)
 
-		// Top bandwidth today
-		if rows, err := histDB.Query(fmt.Sprintf(`
-			SELECT mac, name,
-				SUM(download_kbps) as total_download,
-				SUM(upload_kbps) as total_upload
-			FROM bandwidth_samples
-			WHERE timestamp >= ?
-			GROUP BY mac
-			ORDER BY (total_download + total_upload) DESC
-			LIMIT %d
-		`, bandwidthLimit), todayStr); err == nil {
-			defer rows.Close()
-			var entries []struct {
-				mac, name string
-				down, up  int64
-			}
-			for rows.Next() {
-				var mac, name sql.NullString
-				var down, up int64
-				if err := rows.Scan(&mac, &name, &down, &up); err == nil {
-					if down+up > 0 {
-						entries = append(entries, struct {
-							mac, name string
-							down, up  int64
-						}{mac.String, name.String, down, up})
-					}
-				}
-			}
-			if len(entries) > 0 {
-				interval := estimateInterval(histDB, startOfDay)
-				sb.WriteString("\n=== TOP BANDWIDTH TODAY ===\n")
-				sb.WriteString(fmt.Sprintf("%-25s %-14s %-14s\n", "NAME", "DOWNLOAD", "UPLOAD"))
-				for _, e := range entries {
-					name := e.name
-					if alias, ok := aliases[strings.ToUpper(e.mac)]; ok {
-						name = alias
-					}
-					if len(name) > 24 {
-						name = name[:24]
-					}
-					if name == "" {
-						name = e.mac
-					}
-					totalDown := float64(e.down * int64(interval))
-					totalUp := float64(e.up * int64(interval))
-					sb.WriteString(fmt.Sprintf("%-25s %-14s %-14s\n",
-						name, formatBytes(totalDown), formatBytes(totalUp)))
-				}
-			}
-		}
-
-		// WAN IP history + performance (today)
-		if rows, err := histDB.Query(fmt.Sprintf(`
-			SELECT timestamp, wan_ip,
-				COALESCE(cpu_percent, 0), COALESCE(mem_percent, 0)
-			FROM network_snapshots
-			WHERE timestamp >= ?
-			ORDER BY timestamp
-			LIMIT %d`, netSnapLimit), todayStr); err == nil {
-			defer rows.Close()
-			type netSnap struct {
-				ts, ip string
-				cpu, mem float64
-			}
-			var snaps []netSnap
-			for rows.Next() {
-				var s netSnap
-				if err := rows.Scan(&s.ts, &s.ip, &s.cpu, &s.mem); err == nil {
-					snaps = append(snaps, s)
-				}
-			}
-			if len(snaps) > 0 {
-				sb.WriteString("\n=== WAN IP HISTORY (today) ===\n")
-				currentIP := ""
-				firstSeen := ""
-				for _, s := range snaps {
-					if s.ip != currentIP {
-						if currentIP != "" {
-							sb.WriteString(fmt.Sprintf("%s  %s -> %s\n", currentIP, firstSeen, s.ts))
-						}
-						currentIP = s.ip
-						firstSeen = s.ts
-					}
-				}
-				if currentIP != "" {
-					sb.WriteString(fmt.Sprintf("%s  %s -> now\n", currentIP, firstSeen))
-				}
-
-				// CPU/Memory summary
-				var sumCPU, sumMem, maxCPU, maxMem float64
-				for _, s := range snaps {
-					sumCPU += s.cpu
-					sumMem += s.mem
-					if s.cpu > maxCPU {
-						maxCPU = s.cpu
-					}
-					if s.mem > maxMem {
-						maxMem = s.mem
-					}
-				}
-				n := float64(len(snaps))
-				sb.WriteString(fmt.Sprintf("\nPerformance (%d snapshots): CPU avg %.1f%% max %.1f%% | Memory avg %.1f%% max %.1f%%\n",
-					len(snaps), sumCPU/n, maxCPU, sumMem/n, maxMem))
-			}
-		}
-
-		// Mesh node uptime (today)
-		if rows, err := histDB.Query(fmt.Sprintf(`
-			SELECT name, role, mac, status, firmware
-			FROM mesh_snapshots
-			WHERE timestamp >= ?
-			ORDER BY timestamp
-			LIMIT %d`, meshSnapLimit), todayStr); err == nil {
-			defer rows.Close()
-			type nodeStats struct {
-				name, role, firmware string
-				total, online        int
-			}
-			nodes := map[string]*nodeStats{}
-			var nodeOrder []string
-			for rows.Next() {
-				var name, role, mac, status, firmware sql.NullString
-				if err := rows.Scan(&name, &role, &mac, &status, &firmware); err == nil {
-					key := mac.String
-					ns, ok := nodes[key]
-					if !ok {
-						ns = &nodeStats{name: name.String, role: role.String, firmware: firmware.String}
-						nodes[key] = ns
-						nodeOrder = append(nodeOrder, key)
-					}
-					ns.total++
-					if status.String == "online" {
-						ns.online++
-					}
-				}
-			}
-			if len(nodes) > 0 {
-				sb.WriteString("\n=== MESH NODE UPTIME (today) ===\n")
-				sb.WriteString(fmt.Sprintf("%-20s %-8s %-18s %-12s %s\n", "NAME", "ROLE", "MAC", "FIRMWARE", "UPTIME"))
-				for _, mac := range nodeOrder {
-					ns := nodes[mac]
-					uptime := float64(ns.online) / float64(ns.total) * 100
-					sb.WriteString(fmt.Sprintf("%-20s %-8s %-18s %-12s %.1f%%\n",
-						ns.name, ns.role, mac, ns.firmware, uptime))
-				}
-			}
-		}
-
-		// All known MACs ever seen (for "have you seen device X?" type questions)
-		if rows, err := histDB.Query(fmt.Sprintf(`
-			SELECT mac, name, MAX(timestamp) as last_seen, COUNT(*) as samples
-			FROM bandwidth_samples
-			GROUP BY mac
-			ORDER BY last_seen DESC
-			LIMIT %d`, knownLimit)); err == nil {
-			defer rows.Close()
-			type knownDev struct {
-				mac, name, lastSeen string
-				samples             int64
-			}
-			var devs []knownDev
-			for rows.Next() {
-				var mac, name sql.NullString
-				var lastSeen string
-				var samples int64
-				if err := rows.Scan(&mac, &name, &lastSeen, &samples); err == nil {
-					devs = append(devs, knownDev{mac.String, name.String, lastSeen, samples})
-				}
-			}
-			if len(devs) > 0 {
-				sb.WriteString("\n=== ALL KNOWN DEVICES (from history) ===\n")
-				sb.WriteString(fmt.Sprintf("%-25s %-18s %-22s %s\n", "NAME", "MAC", "LAST SEEN", "SAMPLES"))
-				for _, d := range devs {
-					name := d.name
-					if alias, ok := aliases[strings.ToUpper(d.mac)]; ok {
-						name = alias
-					}
-					if name == "" {
-						name = "(unknown)"
-					}
-					if len(name) > 24 {
-						name = name[:24]
-					}
-					sb.WriteString(fmt.Sprintf("%-25s %-18s %-22s %d\n",
-						name, d.mac, d.lastSeen, d.samples))
-				}
-			}
-		}
+		appendBandwidthHistory(&sb, histDB, aliases, bandwidthLimit, startOfDay, todayStr)
+		appendNetworkHistory(&sb, histDB, netSnapLimit, todayStr)
+		appendMeshHistory(&sb, histDB, meshSnapLimit, todayStr)
+		appendKnownDevices(&sb, histDB, aliases, knownLimit)
 	}
 
 	return sb.String()
+}
+
+// appendBandwidthHistory adds the "TOP BANDWIDTH TODAY" section to the context.
+func appendBandwidthHistory(sb *strings.Builder, db *sql.DB, aliases map[string]string, limit int, startOfDay time.Time, todayStr string) {
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT mac, name,
+			SUM(download_kbps) as total_download,
+			SUM(upload_kbps) as total_upload
+		FROM bandwidth_samples
+		WHERE timestamp >= ?
+		GROUP BY mac
+		ORDER BY (total_download + total_upload) DESC
+		LIMIT %d
+	`, limit), todayStr)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	var entries []struct {
+		mac, name string
+		down, up  int64
+	}
+	for rows.Next() {
+		var mac, name sql.NullString
+		var down, up int64
+		if err := rows.Scan(&mac, &name, &down, &up); err == nil {
+			if down+up > 0 {
+				entries = append(entries, struct {
+					mac, name string
+					down, up  int64
+				}{mac.String, name.String, down, up})
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return
+	}
+
+	interval := estimateInterval(db, startOfDay)
+	sb.WriteString("\n=== TOP BANDWIDTH TODAY ===\n")
+	sb.WriteString(fmt.Sprintf("%-25s %-14s %-14s\n", "NAME", "DOWNLOAD", "UPLOAD"))
+	for _, e := range entries {
+		name := e.name
+		if alias, ok := aliases[strings.ToUpper(e.mac)]; ok {
+			name = alias
+		}
+		if len(name) > 24 {
+			name = name[:24]
+		}
+		if name == "" {
+			name = e.mac
+		}
+		totalDown := float64(e.down * int64(interval))
+		totalUp := float64(e.up * int64(interval))
+		sb.WriteString(fmt.Sprintf("%-25s %-14s %-14s\n",
+			name, formatBytes(totalDown), formatBytes(totalUp)))
+	}
+}
+
+// appendNetworkHistory adds the "WAN IP HISTORY" and performance summary sections.
+func appendNetworkHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr string) {
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT timestamp, wan_ip,
+			COALESCE(cpu_percent, 0), COALESCE(mem_percent, 0)
+		FROM network_snapshots
+		WHERE timestamp >= ?
+		ORDER BY timestamp
+		LIMIT %d`, limit), todayStr)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type netSnap struct {
+		ts, ip   string
+		cpu, mem float64
+	}
+	var snaps []netSnap
+	for rows.Next() {
+		var s netSnap
+		if err := rows.Scan(&s.ts, &s.ip, &s.cpu, &s.mem); err == nil {
+			snaps = append(snaps, s)
+		}
+	}
+	if len(snaps) == 0 {
+		return
+	}
+
+	sb.WriteString("\n=== WAN IP HISTORY (today) ===\n")
+	currentIP := ""
+	firstSeen := ""
+	for _, s := range snaps {
+		if s.ip != currentIP {
+			if currentIP != "" {
+				sb.WriteString(fmt.Sprintf("%s  %s -> %s\n", currentIP, firstSeen, s.ts))
+			}
+			currentIP = s.ip
+			firstSeen = s.ts
+		}
+	}
+	if currentIP != "" {
+		sb.WriteString(fmt.Sprintf("%s  %s -> now\n", currentIP, firstSeen))
+	}
+
+	var sumCPU, sumMem, maxCPU, maxMem float64
+	for _, s := range snaps {
+		sumCPU += s.cpu
+		sumMem += s.mem
+		if s.cpu > maxCPU {
+			maxCPU = s.cpu
+		}
+		if s.mem > maxMem {
+			maxMem = s.mem
+		}
+	}
+	n := float64(len(snaps))
+	sb.WriteString(fmt.Sprintf("\nPerformance (%d snapshots): CPU avg %.1f%% max %.1f%% | Memory avg %.1f%% max %.1f%%\n",
+		len(snaps), sumCPU/n, maxCPU, sumMem/n, maxMem))
+}
+
+// appendMeshHistory adds the "MESH NODE UPTIME" section.
+func appendMeshHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr string) {
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT name, role, mac, status, firmware
+		FROM mesh_snapshots
+		WHERE timestamp >= ?
+		ORDER BY timestamp
+		LIMIT %d`, limit), todayStr)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type nodeStats struct {
+		name, role, firmware string
+		total, online        int
+	}
+	nodes := map[string]*nodeStats{}
+	var nodeOrder []string
+	for rows.Next() {
+		var name, role, mac, status, firmware sql.NullString
+		if err := rows.Scan(&name, &role, &mac, &status, &firmware); err == nil {
+			key := mac.String
+			ns, ok := nodes[key]
+			if !ok {
+				ns = &nodeStats{name: name.String, role: role.String, firmware: firmware.String}
+				nodes[key] = ns
+				nodeOrder = append(nodeOrder, key)
+			}
+			ns.total++
+			if status.String == "online" {
+				ns.online++
+			}
+		}
+	}
+	if len(nodes) == 0 {
+		return
+	}
+
+	sb.WriteString("\n=== MESH NODE UPTIME (today) ===\n")
+	sb.WriteString(fmt.Sprintf("%-20s %-8s %-18s %-12s %s\n", "NAME", "ROLE", "MAC", "FIRMWARE", "UPTIME"))
+	for _, mac := range nodeOrder {
+		ns := nodes[mac]
+		uptime := float64(ns.online) / float64(ns.total) * 100
+		sb.WriteString(fmt.Sprintf("%-20s %-8s %-18s %-12s %.1f%%\n",
+			ns.name, ns.role, mac, ns.firmware, uptime))
+	}
+}
+
+// appendKnownDevices adds the "ALL KNOWN DEVICES" section.
+func appendKnownDevices(sb *strings.Builder, db *sql.DB, aliases map[string]string, limit int) {
+	rows, err := db.Query(fmt.Sprintf(`
+		SELECT mac, name, MAX(timestamp) as last_seen, COUNT(*) as samples
+		FROM bandwidth_samples
+		GROUP BY mac
+		ORDER BY last_seen DESC
+		LIMIT %d`, limit))
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	type knownDev struct {
+		mac, name, lastSeen string
+		samples             int64
+	}
+	var devs []knownDev
+	for rows.Next() {
+		var mac, name sql.NullString
+		var lastSeen string
+		var samples int64
+		if err := rows.Scan(&mac, &name, &lastSeen, &samples); err == nil {
+			devs = append(devs, knownDev{mac.String, name.String, lastSeen, samples})
+		}
+	}
+	if len(devs) == 0 {
+		return
+	}
+
+	sb.WriteString("\n=== ALL KNOWN DEVICES (from history) ===\n")
+	sb.WriteString(fmt.Sprintf("%-25s %-18s %-22s %s\n", "NAME", "MAC", "LAST SEEN", "SAMPLES"))
+	for _, d := range devs {
+		name := d.name
+		if alias, ok := aliases[strings.ToUpper(d.mac)]; ok {
+			name = alias
+		}
+		if name == "" {
+			name = "(unknown)"
+		}
+		if len(name) > 24 {
+			name = name[:24]
+		}
+		sb.WriteString(fmt.Sprintf("%-25s %-18s %-22s %d\n",
+			name, d.mac, d.lastSeen, d.samples))
+	}
 }
 
 // streamOllamaChat sends a chat request to Ollama and streams the response to w.
