@@ -24,9 +24,10 @@ import (
 const defaultOllamaModel = "llama3.2"
 const defaultOllamaURL = "http://localhost:11434"
 
-// ollamaClient is a dedicated HTTP client for Ollama API requests,
-// avoiding the shared http.DefaultClient which has no timeout.
-var ollamaClient = &http.Client{Timeout: 5 * time.Minute}
+// ollamaClient is a dedicated HTTP client for Ollama API requests.
+// No client-level timeout is set because streamOllamaChat applies a
+// per-request context timeout; a client-level timeout would race with it.
+var ollamaClient = &http.Client{}
 
 type ollamaMessage struct {
 	Role    string `json:"role"`
@@ -162,7 +163,8 @@ const (
 // gatherNetworkContext builds a structured text prompt with live router data and/or DB history.
 // When compact is true, limits are tighter to fit smaller context windows.
 // If db is non-nil it is used for historical queries; otherwise the function opens its own connection.
-func gatherNetworkContext(compact bool, db *sql.DB) (string, networkSnapshot) {
+// The ctx parameter is threaded through to router API calls for cancellation support.
+func gatherNetworkContext(ctx context.Context, compact bool, db *sql.DB) (string, networkSnapshot) {
 	bandwidthLimit := maxBandwidthDevices
 	knownLimit := maxKnownDevices
 	netSnapLimit := maxNetworkSnapshots
@@ -200,7 +202,6 @@ func gatherNetworkContext(compact bool, db *sql.DB) (string, networkSnapshot) {
 			wg       sync.WaitGroup
 		)
 		wg.Add(4)
-		ctx := context.Background()
 		go func() { defer wg.Done(); clients, cliErr = client.GetClients(ctx) }()
 		go func() { defer wg.Done(); network, netErr = client.GetNetwork(ctx) }()
 		go func() { defer wg.Done(); mesh, meshErr = client.GetMesh(ctx) }()
@@ -646,13 +647,16 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 	model = resolved
 
 	// Open DB once and reuse for context gathering (and refresh calls)
-	chatDB, _ := initDB()
+	chatDB, dbErr := initDB()
+	if dbErr != nil {
+		decolog.Warn("chat: could not open database (historical data unavailable): %v", dbErr)
+	}
 	if chatDB != nil {
 		defer chatDB.Close()
 	}
 
 	fmt.Fprint(os.Stderr, "Gathering network data... ")
-	systemPrompt, currentSnapshot := gatherNetworkContext(compact, chatDB)
+	systemPrompt, currentSnapshot := gatherNetworkContext(context.Background(), compact, chatDB)
 	fmt.Fprintln(os.Stderr, "done.")
 
 	if showContext {
@@ -766,6 +770,11 @@ func runChatBasicREPL(ollamaURL, model string, compact bool, messages []ollamaMe
 	return nil
 }
 
+// maxChatMessages caps the message history to prevent unbounded memory growth.
+// The system message (index 0) is always preserved; older user/assistant pairs
+// are dropped when the limit is exceeded.
+const maxChatMessages = 100
+
 // chatState holds the mutable state shared across REPL iterations.
 // It is passed to processChatCommand so the readline and basic-scanner
 // REPL loops can share command-processing logic.
@@ -788,7 +797,7 @@ func processChatCommand(input string, state *chatState) (bool, error) {
 	if input == "refresh" {
 		fmt.Fprint(os.Stderr, "Refreshing network data... ")
 		oldSnapshot := state.currentSnapshot
-		newPrompt, newSnapshot := gatherNetworkContext(state.compact, state.chatDB)
+		newPrompt, newSnapshot := gatherNetworkContext(context.Background(), state.compact, state.chatDB)
 		state.currentSnapshot = newSnapshot
 		state.messages = []ollamaMessage{
 			{Role: "system", Content: newPrompt},
@@ -823,6 +832,11 @@ func processChatCommand(input string, state *chatState) (bool, error) {
 	}
 
 	state.messages = append(state.messages, ollamaMessage{Role: "assistant", Content: response})
+
+	// Trim old messages if history exceeds cap, preserving the system message.
+	if len(state.messages) > maxChatMessages {
+		state.messages = append(state.messages[:1], state.messages[len(state.messages)-(maxChatMessages-1):]...)
+	}
 	return false, nil
 }
 
@@ -831,53 +845,6 @@ type networkSnapshot struct {
 	DeviceMACs map[string]string // MAC -> name
 	WANIP     string
 	DeviceCount int
-}
-
-// parseNetworkSnapshot extracts key data from a system prompt for diffing.
-func parseNetworkSnapshot(prompt string) networkSnapshot {
-	snap := networkSnapshot{DeviceMACs: make(map[string]string)}
-
-	lines := strings.Split(prompt, "\n")
-	inDevices := false
-	for _, line := range lines {
-		if strings.Contains(line, "=== CONNECTED DEVICES") {
-			inDevices = true
-			// Parse count from header like "=== CONNECTED DEVICES (14) ==="
-			if start := strings.Index(line, "("); start >= 0 {
-				if end := strings.Index(line[start:], ")"); end >= 0 {
-					fmt.Sscanf(line[start+1:start+end], "%d", &snap.DeviceCount)
-				}
-			}
-			continue
-		}
-		if inDevices && strings.HasPrefix(line, "===") {
-			inDevices = false
-		}
-		if inDevices && line != "" && !strings.HasPrefix(line, "NAME") {
-			fields := strings.Fields(line)
-			// Find the MAC field (XX-XX-XX-XX-XX-XX pattern)
-			for i, f := range fields {
-				if len(f) == 17 && strings.Count(f, "-") == 5 {
-					// Name is everything before the IP field (which is right before MAC)
-					nameEnd := i - 1 // skip the IP field
-					if nameEnd < 0 {
-						nameEnd = 0
-					}
-					name := strings.Join(fields[:nameEnd], " ")
-					snap.DeviceMACs[f] = name
-					break
-				}
-			}
-		}
-		if strings.Contains(line, "WAN IP:") {
-			parts := strings.Split(line, "|")
-			if len(parts) > 0 {
-				wan := strings.TrimPrefix(parts[0], "WAN IP: ")
-				snap.WANIP = strings.TrimSpace(wan)
-			}
-		}
-	}
-	return snap
 }
 
 // wanIPChanged reports whether the WAN IP has changed between two snapshots.

@@ -589,18 +589,21 @@ func (dc *DecoClient) Request(ctx context.Context, path string, reqData map[stri
 }
 
 // Logout sends a logout request to the router.
+// The session is marked as logged-out immediately under the lock,
+// then the HTTP call is made without holding the mutex.
 func (dc *DecoClient) Logout() {
 	dc.mu.Lock()
-	defer dc.mu.Unlock()
-	if dc.logged {
-		// Use a short timeout context for logout — don't block on unresponsive router.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if _, err := dc.requestOnceUnlocked(ctx, "admin/system?form=logout", map[string]interface{}{"operation": "write"}); err != nil {
-			decolog.Debug("logout request failed: %v", err)
-		}
-		dc.logged = false
+	if !dc.logged {
+		dc.mu.Unlock()
+		return
 	}
+	dc.logged = false
+	dc.mu.Unlock()
+
+	// Best-effort logout; don't block callers on unresponsive router.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dc.requestOnce(ctx, "admin/system?form=logout", map[string]interface{}{"operation": "write"})
 }
 
 // ==================== API METHODS ====================

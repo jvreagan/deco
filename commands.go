@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -33,7 +32,9 @@ func runSetup() error {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	fmt.Print("Router IP [192.168.68.1]: ")
-	scanner.Scan()
+	if !scanner.Scan() {
+		return fmt.Errorf("failed to read input: %v", scanner.Err())
+	}
 	host := strings.TrimSpace(scanner.Text())
 	if host == "" {
 		host = "192.168.68.1"
@@ -44,7 +45,9 @@ func runSetup() error {
 	fmt.Println() // ReadPassword doesn't echo newline
 	if err != nil {
 		// Fallback to plain text if terminal is not available
-		scanner.Scan()
+		if !scanner.Scan() {
+			return fmt.Errorf("failed to read input: %v", scanner.Err())
+		}
 		passwordBytes = []byte(strings.TrimSpace(scanner.Text()))
 	}
 	password := strings.TrimSpace(string(passwordBytes))
@@ -655,58 +658,76 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 
 func loadKnownMACs(database *sql.DB) map[string]bool { return db.LoadKnownMACs(database) }
 
-var webhookClient = &http.Client{Timeout: 10 * time.Second}
 var blockPrivateWebhooks = true // set to false in tests
 
-// isPrivateURL checks if the given URL resolves to a private or loopback address.
-func isPrivateURL(urlStr string) bool {
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return false
-	}
-	host := u.Hostname()
-	if host == "" {
-		return false
-	}
+// privateNets is the list of private/reserved CIDRs for SSRF protection.
+var privateNets []*net.IPNet
 
-	ips, err := net.LookupHost(host)
-	if err != nil {
-		return false
-	}
-
-	privateCIDRs := []string{
+func init() {
+	for _, cidr := range []string{
 		"127.0.0.0/8",
 		"10.0.0.0/8",
 		"172.16.0.0/12",
 		"192.168.0.0/16",
 		"169.254.0.0/16",
-	}
-	var privateNets []*net.IPNet
-	for _, cidr := range privateCIDRs {
+	} {
 		_, n, _ := net.ParseCIDR(cidr)
 		privateNets = append(privateNets, n)
 	}
+}
 
-	for _, ipStr := range ips {
-		ip := net.ParseIP(ipStr)
-		if ip == nil {
-			continue
-		}
-		// Check IPv6 loopback and ULA (fc00::/7)
-		if ip.Equal(net.IPv6loopback) {
+// isPrivateIP checks whether an IP is in a private/reserved range.
+func isPrivateIP(ip net.IP) bool {
+	if ip.Equal(net.IPv6loopback) {
+		return true
+	}
+	// fc00::/7 covers fc00:: through fdff:: (IPv6 ULA)
+	if len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
+		return true
+	}
+	for _, n := range privateNets {
+		if n.Contains(ip) {
 			return true
-		}
-		// fc00::/7 covers fc00:: through fdff::
-		if len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
-			return true
-		}
-		for _, n := range privateNets {
-			if n.Contains(ip) {
-				return true
-			}
 		}
 	}
 	return false
+}
+
+// ssrfSafeDialContext rejects connections to private/loopback addresses,
+// preventing TOCTOU issues where DNS resolves differently between check and connect.
+// When blockPrivateWebhooks is false (tests), the check is skipped.
+func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	if !blockPrivateWebhooks {
+		return dialer.DialContext(ctx, network, addr)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip.IP) {
+			return nil, fmt.Errorf("webhook blocked: %s resolves to private address %s", host, ip.IP)
+		}
+	}
+	// Connect to the first resolved IP to avoid re-resolution.
+	return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+}
+
+// webhookClient uses a custom transport that validates resolved IPs at connect time,
+// eliminating DNS TOCTOU issues. Redirects are disabled to prevent open-redirect SSRF.
+var webhookClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		DialContext: ssrfSafeDialContext,
+	},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
 }
 
 // sendWebhook is fire-and-forget: it logs warnings on failure rather than
@@ -719,11 +740,6 @@ func sendWebhook(webhookURL string, payload WebhookPayload) {
 
 	if strings.HasPrefix(webhookURL, "http://") {
 		decolog.Warn("webhook URL uses plain HTTP (not HTTPS): %s", webhookURL)
-	}
-
-	if blockPrivateWebhooks && isPrivateURL(webhookURL) {
-		decolog.Warn("webhook blocked: URL resolves to a private/loopback address: %s", webhookURL)
-		return
 	}
 
 	body, err := json.Marshal(payload)
@@ -949,11 +965,8 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	return nil
 }
 
-var validPeriods = db.ValidPeriods
-
 func parsePeriod(period string) (time.Time, string, error) { return db.ParsePeriod(period) }
-func validatePeriod(period string) error                    { return db.ValidatePeriod(period) }
-func estimateInterval(database *sql.DB, since time.Time) int {
+func estimateInterval(database db.Querier, since time.Time) int {
 	return db.EstimateInterval(database, since)
 }
 
@@ -1100,7 +1113,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 		fmt.Fprintf(os.Stderr, "Warning: failed to count samples: %v\n", err)
 	}
 
-	intervalSec := estimateInterval(db, startTime)
+	intervalSec := estimateInterval(tx, startTime)
 
 	report := &Report{
 		Period:          periodName,

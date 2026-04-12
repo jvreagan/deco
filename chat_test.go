@@ -203,7 +203,7 @@ func TestGatherNetworkContextDBOnly(t *testing.T) {
 		t.Fatalf("insert failed: %v", err)
 	}
 
-	ctx, _ := gatherNetworkContext(false, nil)
+	ctx, _ := gatherNetworkContext(context.Background(), false, nil)
 
 	// Should contain the system prompt header
 	if !strings.Contains(ctx, "network assistant") {
@@ -225,7 +225,7 @@ func TestGatherNetworkContextDBOnly(t *testing.T) {
 func TestGatherNetworkContextEmpty(t *testing.T) {
 	testEnv(t) // isolate config — no DB data, no router
 
-	ctx, _ := gatherNetworkContext(false, nil)
+	ctx, _ := gatherNetworkContext(context.Background(), false, nil)
 
 	// Should still return a valid prompt
 	if !strings.Contains(ctx, "network assistant") {
@@ -265,7 +265,7 @@ func TestGatherNetworkContextAliasSubstitution(t *testing.T) {
 		t.Fatalf("insert failed: %v", err)
 	}
 
-	ctx, _ := gatherNetworkContext(false, nil)
+	ctx, _ := gatherNetworkContext(context.Background(), false, nil)
 
 	// Alias should appear instead of original name
 	if !strings.Contains(ctx, "Living Room TV") {
@@ -294,7 +294,7 @@ func TestGatherNetworkContextMultipleDevicesOrdered(t *testing.T) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, "AA-BB-CC-DD-EE-FF", "BigDevice", "192.168.68.102", "WiFi 5GHz", "pc", 50000, 10000)
 
-	ctx, _ := gatherNetworkContext(false, nil)
+	ctx, _ := gatherNetworkContext(context.Background(), false, nil)
 
 	if !strings.Contains(ctx, "TOP BANDWIDTH TODAY") {
 		t.Fatal("expected bandwidth section")
@@ -326,7 +326,7 @@ func TestGatherNetworkContextNoNameFallsBackToMAC(t *testing.T) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, "AA-BB-CC-DD-EE-FF", "", "192.168.68.100", "Wired", "unknown", 1000, 200)
 
-	ctx, _ := gatherNetworkContext(false, nil)
+	ctx, _ := gatherNetworkContext(context.Background(), false, nil)
 
 	// Should fall back to MAC address as display name
 	if !strings.Contains(ctx, "AA-BB-CC-DD-EE-FF") {
@@ -343,7 +343,7 @@ func TestGatherNetworkContextAliasesListed(t *testing.T) {
 	}
 	saveAliases(aliases)
 
-	ctx, _ := gatherNetworkContext(false, nil)
+	ctx, _ := gatherNetworkContext(context.Background(), false, nil)
 
 	if !strings.Contains(ctx, "KNOWN DEVICES (aliases)") {
 		t.Error("expected 'KNOWN DEVICES (aliases)' section")
@@ -371,7 +371,7 @@ func TestGatherNetworkContextNetworkSnapshots(t *testing.T) {
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		ts, "1.2.3.4", "1.2.3.1", "8.8.8.8", "8.8.4.4", 15.0, 42.0)
 
-	ctx, _ := gatherNetworkContext(false, nil)
+	ctx, _ := gatherNetworkContext(context.Background(), false, nil)
 
 	if !strings.Contains(ctx, "WAN IP HISTORY") {
 		t.Error("expected 'WAN IP HISTORY' section")
@@ -403,7 +403,7 @@ func TestGatherNetworkContextMeshSnapshots(t *testing.T) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, "Deco_5F8C", "slave", "192.168.71.250", "8C-90-2D-B5-5F-8C", "BE63", "1.2.10", "online")
 
-	ctx, _ := gatherNetworkContext(false, nil)
+	ctx, _ := gatherNetworkContext(context.Background(), false, nil)
 
 	if !strings.Contains(ctx, "MESH NODE UPTIME") {
 		t.Error("expected 'MESH NODE UPTIME' section")
@@ -436,7 +436,7 @@ func TestGatherNetworkContextAllKnownDevices(t *testing.T) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, "11-22-33-44-55-66", "DeviceB", "192.168.68.101", "WiFi 5GHz", "phone", 500, 50)
 
-	ctx, _ := gatherNetworkContext(false, nil)
+	ctx, _ := gatherNetworkContext(context.Background(), false, nil)
 
 	if !strings.Contains(ctx, "ALL KNOWN DEVICES") {
 		t.Error("expected 'ALL KNOWN DEVICES' section")
@@ -469,8 +469,8 @@ func TestGatherNetworkContextCompactMode(t *testing.T) {
 			ts, mac, name, "192.168.68.100", "Wired", "pc", (30-i)*100, (30-i)*10)
 	}
 
-	full, _ := gatherNetworkContext(false, nil)
-	compact, _ := gatherNetworkContext(true, nil)
+	full, _ := gatherNetworkContext(context.Background(), false, nil)
+	compact, _ := gatherNetworkContext(context.Background(), true, nil)
 
 	// Compact context should be shorter than full
 	if len(compact) >= len(full) {
@@ -815,7 +815,7 @@ func TestSaveConversationEmptyMessages(t *testing.T) {
 
 func TestGatherNetworkContextAntiHallucination(t *testing.T) {
 	testEnv(t)
-	ctx, _ := gatherNetworkContext(false, nil)
+	ctx, _ := gatherNetworkContext(context.Background(), false, nil)
 
 	if !strings.Contains(ctx, "Only state facts") {
 		t.Error("expected anti-hallucination instruction in context")
@@ -1009,35 +1009,6 @@ func TestChatCmdListModelsFlag(t *testing.T) {
 }
 
 // ==================== REFRESH DIFF TESTS ====================
-
-func TestParseNetworkSnapshot(t *testing.T) {
-	prompt := `You are a network assistant.
-
-=== CONNECTED DEVICES (3) ===
-NAME                      IP               MAC                CONNECTION     DOWN       UP
-Jamess-MBP                192.168.68.50    8C-85-90-89-F5-DA  WiFi 5GHz      120KB/s    5KB/s
-XBOX                      192.168.68.71    68-6C-E6-F2-75-5B  WiFi 5GHz      -          -
-Printer                   192.168.68.74    90-CD-B6-54-18-89  Wired          -          -
-
-=== NETWORK ===
-WAN IP: 1.2.3.4 | Gateway: 1.2.3.1 | CPU: 15% | Memory: 42%
-`
-
-	snap := parseNetworkSnapshot(prompt)
-
-	if snap.DeviceCount != 3 {
-		t.Errorf("expected 3 devices, got %d", snap.DeviceCount)
-	}
-	if snap.WANIP != "1.2.3.4" {
-		t.Errorf("expected WAN IP '1.2.3.4', got %q", snap.WANIP)
-	}
-	if len(snap.DeviceMACs) != 3 {
-		t.Errorf("expected 3 MAC entries, got %d", len(snap.DeviceMACs))
-	}
-	if name, ok := snap.DeviceMACs["8C-85-90-89-F5-DA"]; !ok || name != "Jamess-MBP" {
-		t.Errorf("expected Jamess-MBP for 8C-85-90-89-F5-DA, got %q (ok=%v)", name, ok)
-	}
-}
 
 func TestDiffNetworkSnapshotsNewDevice(t *testing.T) {
 	old := networkSnapshot{

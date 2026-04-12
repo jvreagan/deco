@@ -77,9 +77,17 @@ func ResetCachedInterval() {
 	CachedInterval.Val = 0
 }
 
+// Querier is implemented by both *sql.DB and *sql.Tx, allowing functions to
+// operate within or outside a transaction.
+type Querier interface {
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
 // EstimateInterval derives the polling interval from sample timestamps.
 // Returns the median gap between consecutive distinct timestamps, or 5 as fallback.
-func EstimateInterval(database *sql.DB, since time.Time) int {
+// Accepts both *sql.DB and *sql.Tx via the Querier interface.
+func EstimateInterval(database Querier, since time.Time) int {
 	CachedInterval.mu.Lock()
 	if CachedInterval.Set && CachedInterval.Since.Equal(since) {
 		val := CachedInterval.Val
@@ -190,8 +198,10 @@ func PurgeByDate(database *sql.DB, cutoff time.Time) (int64, error) {
 	if err := tx.Commit(); err != nil {
 		return total, fmt.Errorf("commit transaction: %v", err)
 	}
-	if _, err := database.Exec("VACUUM"); err != nil {
-		decolog.Warn("VACUUM failed: %v", err)
+	if total > 0 {
+		if _, err := database.Exec("VACUUM"); err != nil {
+			decolog.Warn("VACUUM failed: %v", err)
+		}
 	}
 	return total, nil
 }

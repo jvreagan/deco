@@ -17,12 +17,6 @@ func getDBSize() int64                       { return db.GetDBSize() }
 func checkDBSizeLimit() (bool, int64)        { return db.CheckDBSizeLimit() }
 func pruneOlderThan(database *sql.DB, days int) error { return db.PruneOlderThan(database, days) }
 
-func getSchemaVersion(database *sql.DB) (int, error)      { return db.GetSchemaVersion(database) }
-func setSchemaVersion(database *sql.DB, version int) error { return db.SetSchemaVersion(database, version) }
-func runMigrations(database *sql.DB) error                 { return db.RunMigrations(database) }
-
-var currentSchemaVersion = db.CurrentSchemaVersion()
-
 var dbPath = db.DBPath() // for legacy references; prefer db.DBPath()
 
 // checkDBCapacity stays in main because it calls formatSize from output.go.

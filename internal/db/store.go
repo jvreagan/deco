@@ -21,7 +21,9 @@ func StoreBandwidthSamples(database *sql.DB, clients *decoclient.ClientList, ts 
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			ts, c.MAC, c.Name, c.IP, c.Connection, c.Type, c.DownloadKbps, c.UploadKbps); err != nil {
-			decolog.Warn("[%s] DB error (bandwidth): %v", logTS, err)
+			tx.Rollback()
+			decolog.Warn("[%s] DB error (bandwidth insert %s): %v", logTS, c.MAC, err)
+			return
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -30,6 +32,7 @@ func StoreBandwidthSamples(database *sql.DB, clients *decoclient.ClientList, ts 
 }
 
 // StoreNetworkSnapshot inserts a network snapshot (WAN, LAN, performance) into the database.
+// Wrapped in a transaction for consistency with other store functions.
 func StoreNetworkSnapshot(database *sql.DB, network *decoclient.NetworkInfo, ts string) {
 	logTS := time.Now().Format("15:04:05")
 	var dns1, dns2 string
@@ -37,10 +40,20 @@ func StoreNetworkSnapshot(database *sql.DB, network *decoclient.NetworkInfo, ts 
 		dns1 = network.WAN.DNS[0]
 		dns2 = network.WAN.DNS[1]
 	}
-	if _, err := database.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent)
+	tx, err := database.Begin()
+	if err != nil {
+		decolog.Warn("[%s] DB error (network tx begin): %v", logTS, err)
+		return
+	}
+	if _, err := tx.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ts, network.WAN.IP, network.WAN.Gateway, dns1, dns2, network.LAN.IP, network.LAN.Netmask, network.Performance.CPUPercent, network.Performance.MemPercent); err != nil {
+		tx.Rollback()
 		decolog.Warn("[%s] DB error (network): %v", logTS, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		decolog.Warn("[%s] DB error (network tx commit): %v", logTS, err)
 	}
 }
 
@@ -57,7 +70,9 @@ func StoreMeshSnapshot(database *sql.DB, mesh *decoclient.MeshInfo, ts string) {
 		if _, err := tx.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			ts, d.Name, d.Role, d.IP, d.MAC, d.Model, d.Firmware, d.Status); err != nil {
-			decolog.Warn("[%s] DB error (mesh): %v", logTS, err)
+			tx.Rollback()
+			decolog.Warn("[%s] DB error (mesh insert %s): %v", logTS, d.MAC, err)
+			return
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -86,7 +101,9 @@ func StoreWirelessSnapshot(database *sql.DB, wireless *decoclient.WirelessInfo, 
 		if _, err := tx.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			ts, bandName, band.Host.SSID, band.Host.Channel, band.Host.ChannelWidth, hostEnabled, guestEnabled, band.Guest.SSID); err != nil {
-			decolog.Warn("[%s] DB error (wireless): %v", logTS, err)
+			tx.Rollback()
+			decolog.Warn("[%s] DB error (wireless insert %s): %v", logTS, bandName, err)
+			return
 		}
 	}
 	if err := tx.Commit(); err != nil {

@@ -64,7 +64,10 @@ func TestPKCS7PadUnpad(t *testing.T) {
 			if len(padded)%16 != 0 {
 				t.Errorf("padded length %d is not multiple of 16", len(padded))
 			}
-			unpadded := pkcs7Unpad(padded)
+			unpadded, err := pkcs7Unpad(padded)
+			if err != nil {
+				t.Fatalf("pkcs7Unpad returned error: %v", err)
+			}
 			if len(unpadded) != tt.len {
 				t.Errorf("unpadded length = %d, want %d", len(unpadded), tt.len)
 			}

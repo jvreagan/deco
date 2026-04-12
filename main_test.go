@@ -66,7 +66,7 @@ func TestToInt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := toInt(tt.in)
+			got := decoclient.ToInt(tt.in)
 			if got != tt.want {
 				t.Errorf("toInt(%v) = %d, want %d", tt.in, got, tt.want)
 			}
@@ -88,7 +88,7 @@ func TestToFloat(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := toFloat(tt.in)
+			got := decoclient.ToFloat(tt.in)
 			if got != tt.want {
 				t.Errorf("toFloat(%v) = %f, want %f", tt.in, got, tt.want)
 			}
@@ -103,21 +103,21 @@ func TestGetMap(t *testing.T) {
 	}
 
 	t.Run("key exists", func(t *testing.T) {
-		got := getMap(data, "nested")
+		got := decoclient.GetMap(data, "nested")
 		if got["a"] != 1 {
 			t.Errorf("getMap returned %v, want map with a=1", got)
 		}
 	})
 
 	t.Run("key missing", func(t *testing.T) {
-		got := getMap(data, "nope")
+		got := decoclient.GetMap(data, "nope")
 		if len(got) != 0 {
 			t.Errorf("getMap for missing key returned %v, want empty map", got)
 		}
 	})
 
 	t.Run("key wrong type", func(t *testing.T) {
-		got := getMap(data, "wrong")
+		got := decoclient.GetMap(data, "wrong")
 		if len(got) != 0 {
 			t.Errorf("getMap for wrong type returned %v, want empty map", got)
 		}

@@ -35,22 +35,22 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 	return append(data, padtext...)
 }
 
-func pkcs7Unpad(data []byte) []byte {
+func pkcs7Unpad(data []byte) ([]byte, error) {
 	length := len(data)
 	if length == 0 {
-		return data
+		return nil, fmt.Errorf("pkcs7Unpad: empty data")
 	}
 	padding := int(data[length-1])
 	if padding == 0 || padding > length || padding > aes.BlockSize {
-		return data
+		return nil, fmt.Errorf("pkcs7Unpad: invalid padding byte %d (length %d)", padding, length)
 	}
 	// Validate all padding bytes are identical
 	for i := length - padding; i < length; i++ {
 		if data[i] != byte(padding) {
-			return data
+			return nil, fmt.Errorf("pkcs7Unpad: inconsistent padding at byte %d", i)
 		}
 	}
-	return data[:length-padding]
+	return data[:length-padding], nil
 }
 
 func aesEncrypt(data, key, iv []byte) (string, error) {
@@ -87,7 +87,7 @@ func aesDecrypt(data string, key, iv []byte) ([]byte, error) {
 	mode := cipher.NewCBCDecrypter(block, iv)
 	mode.CryptBlocks(decrypted, encrypted)
 
-	return pkcs7Unpad(decrypted), nil
+	return pkcs7Unpad(decrypted)
 }
 
 func rsaEncryptPKCS1(data []byte, n *big.Int, e int) ([]byte, error) {

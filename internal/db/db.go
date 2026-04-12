@@ -139,11 +139,14 @@ func RunMigrations(db *sql.DB) error {
 			tx.Rollback()
 			return fmt.Errorf("migration to version %d failed: %v", m.version, err)
 		}
+		// Set schema version inside the transaction so it rolls back
+		// together with the DDL on failure.
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("setting schema version %d: %v", m.version, err)
+		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit migration %d: %v", m.version, err)
-		}
-		if err := SetSchemaVersion(db, m.version); err != nil {
-			return fmt.Errorf("setting schema version %d: %v", m.version, err)
 		}
 	}
 	return nil
@@ -232,17 +235,23 @@ func PruneOlderThan(db *sql.DB, days int) error {
 	if err != nil {
 		return fmt.Errorf("begin prune transaction: %v", err)
 	}
+	var totalDeleted int64
 	for _, table := range tables {
-		if _, err := tx.Exec("DELETE FROM "+table+" WHERE timestamp < ?", cutoff); err != nil {
+		result, err := tx.Exec("DELETE FROM "+table+" WHERE timestamp < ?", cutoff)
+		if err != nil {
 			tx.Rollback()
 			return fmt.Errorf("failed to prune %s: %v", table, err)
 		}
+		n, _ := result.RowsAffected()
+		totalDeleted += n
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit prune transaction: %v", err)
 	}
-	if _, err := db.Exec("VACUUM"); err != nil {
-		decolog.Warn("VACUUM failed: %v", err)
+	if totalDeleted > 0 {
+		if _, err := db.Exec("VACUUM"); err != nil {
+			decolog.Warn("VACUUM failed: %v", err)
+		}
 	}
 	return nil
 }

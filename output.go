@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jvreagan/deco/internal/decoclient"
 	"github.com/jvreagan/deco/internal/decolog"
 )
 
@@ -434,10 +433,3 @@ func formatBytes(kb float64) string {
 	}
 	return fmt.Sprintf("%.2f GB", kb/(1024*1024))
 }
-
-// Thin wrappers delegating to decoclient helpers.
-func getMap(data map[string]interface{}, key string) map[string]interface{} { return decoclient.GetMap(data, key) }
-func toInt(v interface{}) int       { return decoclient.ToInt(v) }
-func toFloat(v interface{}) float64 { return decoclient.ToFloat(v) }
-func toString(v interface{}) string { return decoclient.ToString(v) }
-func toBool(v interface{}) bool     { return decoclient.ToBool(v) }
