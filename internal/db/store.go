@@ -9,14 +9,23 @@ import (
 )
 
 // StoreBandwidthSamples inserts bandwidth samples for all connected clients into the database.
+// All inserts are wrapped in a single transaction for performance and atomicity.
 func StoreBandwidthSamples(database *sql.DB, clients *decoclient.ClientList, ts string) {
 	logTS := time.Now().Format("15:04:05")
+	tx, err := database.Begin()
+	if err != nil {
+		decolog.Warn("[%s] DB error (bandwidth tx begin): %v", logTS, err)
+		return
+	}
 	for _, c := range clients.Clients {
-		if _, err := database.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			ts, c.MAC, c.Name, c.IP, c.Connection, c.Type, c.DownloadKbps, c.UploadKbps); err != nil {
 			decolog.Warn("[%s] DB error (bandwidth): %v", logTS, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		decolog.Warn("[%s] DB error (bandwidth tx commit): %v", logTS, err)
 	}
 }
 
@@ -36,20 +45,35 @@ func StoreNetworkSnapshot(database *sql.DB, network *decoclient.NetworkInfo, ts 
 }
 
 // StoreMeshSnapshot inserts mesh node snapshots into the database.
+// All inserts are wrapped in a single transaction for performance and atomicity.
 func StoreMeshSnapshot(database *sql.DB, mesh *decoclient.MeshInfo, ts string) {
 	logTS := time.Now().Format("15:04:05")
+	tx, err := database.Begin()
+	if err != nil {
+		decolog.Warn("[%s] DB error (mesh tx begin): %v", logTS, err)
+		return
+	}
 	for _, d := range mesh.Devices {
-		if _, err := database.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
+		if _, err := tx.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			ts, d.Name, d.Role, d.IP, d.MAC, d.Model, d.Firmware, d.Status); err != nil {
 			decolog.Warn("[%s] DB error (mesh): %v", logTS, err)
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		decolog.Warn("[%s] DB error (mesh tx commit): %v", logTS, err)
+	}
 }
 
 // StoreWirelessSnapshot inserts wireless band snapshots into the database.
+// All inserts are wrapped in a single transaction for performance and atomicity.
 func StoreWirelessSnapshot(database *sql.DB, wireless *decoclient.WirelessInfo, ts string) {
 	logTS := time.Now().Format("15:04:05")
+	tx, err := database.Begin()
+	if err != nil {
+		decolog.Warn("[%s] DB error (wireless tx begin): %v", logTS, err)
+		return
+	}
 	for bandName, band := range wireless.Bands {
 		hostEnabled := 0
 		if band.Host.Enabled {
@@ -59,10 +83,13 @@ func StoreWirelessSnapshot(database *sql.DB, wireless *decoclient.WirelessInfo, 
 		if band.Guest.Enabled {
 			guestEnabled = 1
 		}
-		if _, err := database.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
+		if _, err := tx.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			ts, bandName, band.Host.SSID, band.Host.Channel, band.Host.ChannelWidth, hostEnabled, guestEnabled, band.Guest.SSID); err != nil {
 			decolog.Warn("[%s] DB error (wireless): %v", logTS, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		decolog.Warn("[%s] DB error (wireless tx commit): %v", logTS, err)
 	}
 }

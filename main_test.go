@@ -553,6 +553,8 @@ func TestNotifyNewMAC(t *testing.T) {
 	})
 
 	t.Run("sends webhook with expected payload", func(t *testing.T) {
+		blockPrivateWebhooks = false
+		t.Cleanup(func() { blockPrivateWebhooks = true })
 		var (
 			mu          sync.Mutex
 			gotRequest  bool
@@ -619,6 +621,64 @@ func TestNotifyNewMAC(t *testing.T) {
 			t.Errorf("data.ip = %q, want 192.168.68.100", payload.Data.IP)
 		}
 	})
+}
+
+// TestMonitorNewMACDetection verifies the new-MAC detection logic used by
+// runMonitor: when a client list contains a MAC not in knownMACs, the MAC
+// should be added and notifyNewMAC should fire (#123).
+func TestMonitorNewMACDetection(t *testing.T) {
+	blockPrivateWebhooks = false
+	t.Cleanup(func() { blockPrivateWebhooks = true })
+
+	var webhookCalled bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		webhookCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// Simulate known MACs from a previous poll
+	knownMACs := map[string]bool{
+		"AA-BB-CC-DD-EE-FF": true,
+	}
+
+	// Simulate a client list with one known and one new device
+	clients := &ClientList{
+		Clients: []ClientInfo{
+			{Name: "OldDev", MAC: "AA-BB-CC-DD-EE-FF", IP: "192.168.68.100"},
+			{Name: "NewDev", MAC: "11-22-33-44-55-66", IP: "192.168.68.101"},
+		},
+		Count: 2,
+	}
+
+	// Exercise the same logic as runMonitor's work closure
+	for _, c := range clients.Clients {
+		macUpper := strings.ToUpper(c.MAC)
+		if !knownMACs[macUpper] {
+			notifyNewMAC(c.MAC, c.Name, c.IP, srv.URL)
+			knownMACs[macUpper] = true
+		}
+	}
+
+	if !knownMACs["11-22-33-44-55-66"] {
+		t.Error("new MAC should have been added to knownMACs")
+	}
+	if !webhookCalled {
+		t.Error("webhook should have been called for new device")
+	}
+
+	// Running again should NOT trigger the webhook again
+	webhookCalled = false
+	for _, c := range clients.Clients {
+		macUpper := strings.ToUpper(c.MAC)
+		if !knownMACs[macUpper] {
+			notifyNewMAC(c.MAC, c.Name, c.IP, srv.URL)
+			knownMACs[macUpper] = true
+		}
+	}
+	if webhookCalled {
+		t.Error("webhook should NOT fire for already-known device")
+	}
 }
 
 // ==================== REPORT NETWORK/MESH TESTS ====================
@@ -2433,6 +2493,8 @@ func TestAliasTagSubcommands(t *testing.T) {
 // ==================== WEBHOOK TESTS ====================
 
 func TestSendWebhook(t *testing.T) {
+	blockPrivateWebhooks = false
+	t.Cleanup(func() { blockPrivateWebhooks = true })
 	var received []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received, _ = io.ReadAll(r.Body)

@@ -196,14 +196,20 @@ func gatherNetworkContext(compact bool, db *sql.DB) (string, networkSnapshot) {
 			network  *NetworkInfo
 			mesh     *MeshInfo
 			wifi     *WirelessInfo
+			cliErr, netErr, meshErr, wifiErr error
 			wg       sync.WaitGroup
 		)
 		wg.Add(4)
-		go func() { defer wg.Done(); clients, _ = client.GetClients() }()
-		go func() { defer wg.Done(); network, _ = client.GetNetwork() }()
-		go func() { defer wg.Done(); mesh, _ = client.GetMesh() }()
-		go func() { defer wg.Done(); wifi, _ = client.GetWireless() }()
+		go func() { defer wg.Done(); clients, cliErr = client.GetClients() }()
+		go func() { defer wg.Done(); network, netErr = client.GetNetwork() }()
+		go func() { defer wg.Done(); mesh, meshErr = client.GetMesh() }()
+		go func() { defer wg.Done(); wifi, wifiErr = client.GetWireless() }()
 		wg.Wait()
+		for _, e := range []error{cliErr, netErr, meshErr, wifiErr} {
+			if e != nil {
+				decolog.Debug("chat context fetch error: %v", e)
+			}
+		}
 
 		// Clients
 		if clients != nil {

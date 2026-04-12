@@ -553,8 +553,7 @@ func TestLoadKnownMACs(t *testing.T) {
 func TestEstimateInterval(t *testing.T) {
 	database := setupTestDB(t)
 
-	// Reset cache before test
-	CachedInterval.Set = false
+	ResetCachedInterval()
 
 	// No data → fallback to 5
 	got := EstimateInterval(database, time.Time{})
@@ -571,7 +570,7 @@ func TestEstimateInterval(t *testing.T) {
 	}
 
 	// Reset cache to force re-computation with new data
-	CachedInterval.Set = false
+	ResetCachedInterval()
 
 	got = EstimateInterval(database, time.Time{})
 	if got != 60 {
@@ -582,8 +581,7 @@ func TestEstimateInterval(t *testing.T) {
 func TestEstimateIntervalSingleSample(t *testing.T) {
 	database := setupTestDB(t)
 
-	// Reset cache before test
-	CachedInterval.Set = false
+	ResetCachedInterval()
 
 	ts := time.Now().Format(time.RFC3339)
 	database.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)

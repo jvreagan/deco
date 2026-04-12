@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jvreagan/deco/internal/decolog"
@@ -61,17 +62,32 @@ func ValidatePeriod(period string) error {
 
 // CachedInterval caches the result of EstimateInterval to avoid redundant queries.
 var CachedInterval struct {
+	mu    sync.Mutex
 	Since time.Time
 	Val   int
 	Set   bool
 }
 
+// ResetCachedInterval clears the cached interval state. Intended for use in tests.
+func ResetCachedInterval() {
+	CachedInterval.mu.Lock()
+	defer CachedInterval.mu.Unlock()
+	CachedInterval.Set = false
+	CachedInterval.Since = time.Time{}
+	CachedInterval.Val = 0
+}
+
 // EstimateInterval derives the polling interval from sample timestamps.
 // Returns the median gap between consecutive distinct timestamps, or 5 as fallback.
 func EstimateInterval(database *sql.DB, since time.Time) int {
+	CachedInterval.mu.Lock()
 	if CachedInterval.Set && CachedInterval.Since.Equal(since) {
-		return CachedInterval.Val
+		val := CachedInterval.Val
+		CachedInterval.mu.Unlock()
+		return val
 	}
+	CachedInterval.mu.Unlock()
+
 	rows, err := database.Query(`SELECT DISTINCT timestamp FROM bandwidth_samples
 		WHERE timestamp >= ? ORDER BY timestamp LIMIT 20`, since.Format(time.RFC3339))
 	if err != nil {
@@ -109,9 +125,13 @@ func EstimateInterval(database *sql.DB, since time.Time) int {
 
 	sort.Ints(gaps)
 	result := gaps[len(gaps)/2] // median
+
+	CachedInterval.mu.Lock()
 	CachedInterval.Since = since
 	CachedInterval.Val = result
 	CachedInterval.Set = true
+	CachedInterval.mu.Unlock()
+
 	return result
 }
 
@@ -150,16 +170,25 @@ func CountBeforeDate(database *sql.DB, cutoff time.Time) (int64, error) {
 }
 
 // PurgeByDate deletes all records before the cutoff across all tables.
+// All deletes are wrapped in a single transaction for atomicity.
 func PurgeByDate(database *sql.DB, cutoff time.Time) (int64, error) {
 	cutoffStr := cutoff.Format(time.RFC3339)
+	tx, err := database.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin transaction: %v", err)
+	}
 	var total int64
 	for _, table := range AllTables {
-		result, err := database.Exec("DELETE FROM "+table+" WHERE timestamp < ?", cutoffStr)
+		result, err := tx.Exec("DELETE FROM "+table+" WHERE timestamp < ?", cutoffStr)
 		if err != nil {
+			tx.Rollback()
 			return total, fmt.Errorf("error deleting from %s: %v", table, err)
 		}
 		n, _ := result.RowsAffected()
 		total += n
+	}
+	if err := tx.Commit(); err != nil {
+		return total, fmt.Errorf("commit transaction: %v", err)
 	}
 	if _, err := database.Exec("VACUUM"); err != nil {
 		decolog.Warn("VACUUM failed: %v", err)

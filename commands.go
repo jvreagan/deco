@@ -399,10 +399,20 @@ func runAll() error {
 	}
 	defer client.Logout()
 
-	network, netErr := client.GetNetwork()
-	wireless, wlErr := client.GetWireless()
-	mesh, meshErr := client.GetMesh()
-	clients, cliErr := client.GetClients()
+	var (
+		network  *NetworkInfo
+		wireless *WirelessInfo
+		mesh     *MeshInfo
+		clients  *ClientList
+		netErr, wlErr, meshErr, cliErr error
+		wg sync.WaitGroup
+	)
+	wg.Add(4)
+	go func() { defer wg.Done(); network, netErr = client.GetNetwork() }()
+	go func() { defer wg.Done(); wireless, wlErr = client.GetWireless() }()
+	go func() { defer wg.Done(); mesh, meshErr = client.GetMesh() }()
+	go func() { defer wg.Done(); clients, cliErr = client.GetClients() }()
+	wg.Wait()
 
 	if netErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to get network: %v\n", netErr)
@@ -424,6 +434,7 @@ func runAll() error {
 		Wireless:  wireless,
 		Mesh:      mesh,
 		Clients:   clients,
+		Partial:   netErr != nil || wlErr != nil || meshErr != nil || cliErr != nil,
 	}
 
 	printJSON(data)
@@ -431,6 +442,11 @@ func runAll() error {
 }
 
 func runAPI(endpoint, body string) error {
+	// Reject path traversal and other suspicious characters in the endpoint.
+	if strings.Contains(endpoint, "..") {
+		return fmt.Errorf("invalid endpoint: path traversal not allowed")
+	}
+
 	client, _, err := connectClient()
 	if err != nil {
 		return err
@@ -539,10 +555,20 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 		client := cfg.Client
 		db := cfg.DB
 
-		clientData, clientErr := client.GetClients()
-		networkData, networkErr := client.GetNetwork()
-		wirelessData, wirelessErr := client.GetWireless()
-		meshData, meshErr := client.GetMesh()
+		var (
+			clientData   *ClientList
+			networkData  *NetworkInfo
+			wirelessData *WirelessInfo
+			meshData     *MeshInfo
+			clientErr, networkErr, wirelessErr, meshErr error
+			wg sync.WaitGroup
+		)
+		wg.Add(4)
+		go func() { defer wg.Done(); clientData, clientErr = client.GetClients() }()
+		go func() { defer wg.Done(); networkData, networkErr = client.GetNetwork() }()
+		go func() { defer wg.Done(); wirelessData, wirelessErr = client.GetWireless() }()
+		go func() { defer wg.Done(); meshData, meshErr = client.GetMesh() }()
+		wg.Wait()
 
 		// If all requests failed, session is probably dead
 		if clientErr != nil && networkErr != nil && wirelessErr != nil && meshErr != nil {
@@ -628,6 +654,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 func loadKnownMACs(database *sql.DB) map[string]bool { return db.LoadKnownMACs(database) }
 
 var webhookClient = &http.Client{Timeout: 10 * time.Second}
+var blockPrivateWebhooks = true // set to false in tests
 
 // isPrivateURL checks if the given URL resolves to a private or loopback address.
 func isPrivateURL(urlStr string) bool {
@@ -692,8 +719,9 @@ func sendWebhook(webhookURL string, payload WebhookPayload) {
 		decolog.Warn("webhook URL uses plain HTTP (not HTTPS): %s", webhookURL)
 	}
 
-	if isPrivateURL(webhookURL) {
-		decolog.Warn("webhook URL resolves to a private/loopback address: %s", webhookURL)
+	if blockPrivateWebhooks && isPrivateURL(webhookURL) {
+		decolog.Warn("webhook blocked: URL resolves to a private/loopback address: %s", webhookURL)
+		return
 	}
 
 	body, err := json.Marshal(payload)
@@ -1065,7 +1093,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 	}
 
 	var totalSamples int64
-	if err := db.QueryRow("SELECT COUNT(DISTINCT timestamp) FROM bandwidth_samples WHERE timestamp >= ?",
+	if err := tx.QueryRow("SELECT COUNT(DISTINCT timestamp) FROM bandwidth_samples WHERE timestamp >= ?",
 		startTime.Format(time.RFC3339)).Scan(&totalSamples); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to count samples: %v\n", err)
 	}
@@ -1491,6 +1519,13 @@ func loadTags() map[string][]string {
 	}
 	tagMu.RUnlock()
 
+	// Take write lock and double-check before reading file
+	tagMu.Lock()
+	defer tagMu.Unlock()
+	if tagCache.data != nil && info.ModTime().Equal(tagCache.modTime) {
+		return tagCache.data
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return map[string][]string{}
@@ -1502,10 +1537,8 @@ func loadTags() map[string][]string {
 		return map[string][]string{}
 	}
 
-	tagMu.Lock()
 	tagCache.modTime = info.ModTime()
 	tagCache.data = tags
-	tagMu.Unlock()
 	return tags
 }
 
@@ -1645,6 +1678,13 @@ func loadAliases() map[string]string {
 	}
 	aliasMu.RUnlock()
 
+	// Take write lock and double-check before reading file
+	aliasMu.Lock()
+	defer aliasMu.Unlock()
+	if aliasCache.data != nil && info.ModTime().Equal(aliasCache.modTime) {
+		return aliasCache.data
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return map[string]string{}
@@ -1656,10 +1696,8 @@ func loadAliases() map[string]string {
 		return map[string]string{}
 	}
 
-	aliasMu.Lock()
 	aliasCache.modTime = info.ModTime()
 	aliasCache.data = aliases
-	aliasMu.Unlock()
 	return aliases
 }
 

@@ -33,7 +33,7 @@ func DBPath() string {
 }
 
 // currentSchemaVersion is the latest migration version.
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 type migration struct {
 	version int
@@ -96,6 +96,9 @@ var migrations = []migration{
 			guest_ssid TEXT
 		);
 		CREATE INDEX IF NOT EXISTS idx_wireless_timestamp ON wireless_snapshots(timestamp);
+	`},
+	{version: 2, sql: `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_bandwidth_unique_mac_ts ON bandwidth_samples(mac, timestamp);
 	`},
 }
 
@@ -188,6 +191,7 @@ const dbSizeCheckThrottleSec = 60
 var dbSizeCheckMu sync.Mutex
 var (
 	lastDBSizeCheckTime time.Time
+	lastDBSizeCheckPath string
 	lastDBSizeCheckOK   bool
 	lastDBSizeCheckSize int64
 )
@@ -198,14 +202,25 @@ func CheckDBSizeLimit() (bool, int64) {
 	defer dbSizeCheckMu.Unlock()
 
 	now := time.Now()
-	if !lastDBSizeCheckTime.IsZero() && now.Sub(lastDBSizeCheckTime).Seconds() < float64(dbSizeCheckThrottleSec) {
+	if !lastDBSizeCheckTime.IsZero() && lastDBSizeCheckPath == dbPath && now.Sub(lastDBSizeCheckTime).Seconds() < float64(dbSizeCheckThrottleSec) {
 		return lastDBSizeCheckOK, lastDBSizeCheckSize
 	}
 	size := GetDBSize()
 	lastDBSizeCheckTime = now
+	lastDBSizeCheckPath = dbPath
 	lastDBSizeCheckOK = size < DBSizeLimitBytes
 	lastDBSizeCheckSize = size
 	return lastDBSizeCheckOK, size
+}
+
+// ResetSizeCache clears the DB size check cache. Intended for use in tests.
+func ResetSizeCache() {
+	dbSizeCheckMu.Lock()
+	defer dbSizeCheckMu.Unlock()
+	lastDBSizeCheckTime = time.Time{}
+	lastDBSizeCheckPath = ""
+	lastDBSizeCheckOK = false
+	lastDBSizeCheckSize = 0
 }
 
 // PruneOlderThan deletes records older than the given number of days from all tables.

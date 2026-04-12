@@ -97,4 +97,5 @@ type AllInfo struct {
 	Wireless  *WirelessInfo `json:"wireless"`
 	Mesh      *MeshInfo     `json:"mesh"`
 	Clients   *ClientList   `json:"clients"`
+	Partial   bool          `json:"partial,omitempty"`
 }

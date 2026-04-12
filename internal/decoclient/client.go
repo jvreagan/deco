@@ -379,6 +379,18 @@ func (dc *DecoClient) Authorize() error {
 }
 
 func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
+	// Rate limit outside the mutex to avoid blocking other callers during sleep.
+	dc.mu.Lock()
+	var sleepDur time.Duration
+	if !dc.lastRequest.IsZero() {
+		if elapsed := time.Since(dc.lastRequest); elapsed < MinRequestInterval {
+			sleepDur = MinRequestInterval - elapsed
+		}
+	}
+	dc.mu.Unlock()
+	if sleepDur > 0 {
+		time.Sleep(sleepDur)
+	}
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
 	return dc.requestOnceUnlocked(path, reqData)
@@ -386,13 +398,6 @@ func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (
 
 // requestOnceUnlocked is the lock-free implementation of requestOnce; callers must hold dc.mu.
 func (dc *DecoClient) requestOnceUnlocked(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
-	// Rate limit: ensure at least MinRequestInterval between consecutive requests
-	// to prevent hammering the router (issue #39).
-	if !dc.lastRequest.IsZero() {
-		if elapsed := time.Since(dc.lastRequest); elapsed < MinRequestInterval {
-			time.Sleep(MinRequestInterval - elapsed)
-		}
-	}
 	dc.lastRequest = time.Now()
 
 	start := time.Now()
@@ -496,18 +501,34 @@ func (dc *DecoClient) requestOnceUnlocked(path string, reqData map[string]interf
 
 // Request sends an encrypted API request to the router.
 func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
-	if !dc.logged {
+	dc.mu.Lock()
+	logged := dc.logged
+	dc.mu.Unlock()
+	if !logged {
 		return nil, fmt.Errorf("not logged in")
 	}
 
 	result, err := dc.requestOnce(path, reqData)
 	if err != nil {
-		// Check for session expired/forbidden errors — auto-retry once
+		// Check for session expired/forbidden errors — auto-retry once.
+		// Use the mutex to ensure only one goroutine re-authenticates.
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "API error code: -40401") || strings.Contains(errMsg, "API error code: -40403") {
-			dc.Invalidate()
-			if authErr := dc.Authorize(); authErr != nil {
-				return nil, fmt.Errorf("re-auth failed: %v (original: %v)", authErr, err)
+			dc.mu.Lock()
+			needsReauth := dc.logged // still logged means no one else invalidated yet
+			if needsReauth {
+				dc.invalidate()
+			}
+			dc.mu.Unlock()
+			if needsReauth {
+				if authErr := dc.Authorize(); authErr != nil {
+					return nil, fmt.Errorf("re-auth failed: %v (original: %v)", authErr, err)
+				}
+			} else {
+				// Another goroutine already invalidated; wait briefly then let EnsureAuthorized handle it
+				if authErr := dc.EnsureAuthorized(); authErr != nil {
+					return nil, fmt.Errorf("re-auth failed: %v (original: %v)", authErr, err)
+				}
 			}
 			return dc.requestOnce(path, reqData)
 		}
