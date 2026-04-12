@@ -102,17 +102,28 @@ func LoadConfig() (*Config, error) {
 	return &config, nil
 }
 
-// ValidateConfig checks that the router is reachable with a quick TCP dial.
+// ValidateConfig checks that the router is reachable and responds like a
+// Deco router by hitting the keys endpoint. Falls back to a TCP dial if
+// the HTTP request fails for non-connection reasons.
 func ValidateConfig(config *Config) error {
-	host := config.Host
-	if !strings.Contains(host, ":") {
-		host = host + ":80"
-	}
-	conn, err := net.DialTimeout("tcp", host, 3*time.Second)
+	base := "http://" + config.Host
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", base+"/cgi-bin/luci/;stok=/login?form=keys", nil)
 	if err != nil {
 		return fmt.Errorf("cannot reach router at %s: %v", config.Host, err)
 	}
-	conn.Close()
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return fmt.Errorf("cannot reach router at %s: %v\nCheck that the host is correct, or run 'deco setup'", config.Host, err)
+	}
+	defer resp.Body.Close()
+	// A Deco router returns JSON with a "result" key. If we get HTML or a
+	// 404, it's probably not a Deco.
+	var body map[string]interface{}
+	if decErr := json.NewDecoder(resp.Body).Decode(&body); decErr != nil {
+		return fmt.Errorf("host %s responded but does not look like a Deco router\nRun 'deco setup' to reconfigure", config.Host)
+	}
 	return nil
 }
 
@@ -158,8 +169,26 @@ func (dc *DecoClient) EnsureAuthorized(ctx context.Context) error {
 	}
 
 	// If another goroutine is already authorizing, wait for it to finish.
-	for dc.authorizing {
-		dc.authCond.Wait()
+	// Spawn a watcher that broadcasts on context cancellation so we don't
+	// block indefinitely if the caller's context expires.
+	if dc.authorizing {
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				dc.authCond.Broadcast()
+			case <-done:
+			}
+		}()
+		for dc.authorizing {
+			dc.authCond.Wait()
+			if ctx.Err() != nil {
+				close(done)
+				dc.mu.Unlock()
+				return ctx.Err()
+			}
+		}
+		close(done)
 	}
 	// Re-check after waking up — the auth may have succeeded.
 	if dc.logged && time.Since(dc.lastAuthTime) < sessionRefreshThreshold {

@@ -615,16 +615,33 @@ func TestInvalidateAndReauth(t *testing.T) {
 }
 
 func TestValidateConfig(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	// Valid Deco-like server returns JSON.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"result":{},"error_code":0}`))
+	}))
 	defer server.Close()
 
 	host := strings.TrimPrefix(server.URL, "http://")
 	config := &Config{Host: host, Password: "test"}
 
 	if err := ValidateConfig(config); err != nil {
-		t.Errorf("ValidateConfig should succeed for running server: %v", err)
+		t.Errorf("ValidateConfig should succeed for Deco-like server: %v", err)
 	}
 
+	// Non-Deco server returns HTML.
+	htmlServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("<html><body>Not a Deco</body></html>"))
+	}))
+	defer htmlServer.Close()
+
+	htmlHost := strings.TrimPrefix(htmlServer.URL, "http://")
+	config3 := &Config{Host: htmlHost, Password: "test"}
+	if err := ValidateConfig(config3); err == nil {
+		t.Error("ValidateConfig should fail for non-Deco server")
+	}
+
+	// Unreachable host.
 	config2 := &Config{Host: "192.0.2.1:1", Password: "test"}
 	if err := ValidateConfig(config2); err == nil {
 		t.Error("ValidateConfig should fail for unreachable host")

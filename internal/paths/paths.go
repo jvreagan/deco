@@ -32,8 +32,11 @@ func CfgPath(filename string) string {
 
 // MigrateIfNeeded moves legacy config/data files from the exe directory or
 // cwd into the new config directory. Called once before loading config.
+// Each file is migrated independently, so a crash mid-migration is safe:
+// the next run resumes where it left off. Config is migrated first (needed
+// to connect), then aliases, then the database (largest, least critical).
 func MigrateIfNeeded() {
-	files := []string{"deco_config.json", "network_usage.db", "deco_aliases.json"}
+	files := []string{"deco_config.json", "deco_aliases.json", "network_usage.db"}
 
 	var legacyDirs []string
 	if exe, err := os.Executable(); err == nil {
