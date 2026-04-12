@@ -1,13 +1,15 @@
-package main
+package paths
 
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/jvreagan/deco/internal/decolog"
 )
 
-// configDir returns the directory for all deco config/data files.
+// ConfigDir returns the directory for all deco config/data files.
 // Respects $XDG_CONFIG_HOME; defaults to ~/.config/deco.
-func configDir() string {
+func ConfigDir() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "deco")
 	}
@@ -18,19 +20,19 @@ func configDir() string {
 	return filepath.Join(home, ".config", "deco")
 }
 
-// ensureConfigDir creates the config directory if it doesn't exist.
-func ensureConfigDir() error {
-	return os.MkdirAll(configDir(), 0700)
+// EnsureConfigDir creates the config directory if it doesn't exist.
+func EnsureConfigDir() error {
+	return os.MkdirAll(ConfigDir(), 0700)
 }
 
-// cfgPath returns the full path for a file inside the config directory.
-func cfgPath(filename string) string {
-	return filepath.Join(configDir(), filename)
+// CfgPath returns the full path for a file inside the config directory.
+func CfgPath(filename string) string {
+	return filepath.Join(ConfigDir(), filename)
 }
 
-// migrateIfNeeded moves legacy config/data files from the exe directory or
+// MigrateIfNeeded moves legacy config/data files from the exe directory or
 // cwd into the new config directory. Called once before loading config.
-func migrateIfNeeded() {
+func MigrateIfNeeded() {
 	files := []string{"deco_config.json", "network_usage.db", "deco_aliases.json"}
 
 	var legacyDirs []string
@@ -42,7 +44,7 @@ func migrateIfNeeded() {
 	}
 
 	for _, f := range files {
-		newPath := cfgPath(f)
+		newPath := CfgPath(f)
 		if _, err := os.Stat(newPath); err == nil {
 			continue // already at new location
 		}
@@ -52,14 +54,14 @@ func migrateIfNeeded() {
 			if _, err := os.Stat(oldPath); err != nil {
 				continue
 			}
-			if err := ensureConfigDir(); err != nil {
-				logWarn("cannot create config dir: %v", err)
+			if err := EnsureConfigDir(); err != nil {
+				decolog.Warn("cannot create config dir: %v", err)
 				return
 			}
 			if err := os.Rename(oldPath, newPath); err != nil {
-				logWarn("failed to migrate %s: %v", oldPath, err)
+				decolog.Warn("failed to migrate %s: %v", oldPath, err)
 			} else {
-				logInfo("migrated %s -> %s", oldPath, newPath)
+				decolog.Info("migrated %s -> %s", oldPath, newPath)
 			}
 			break
 		}

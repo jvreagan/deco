@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/jvreagan/deco/internal/decoclient"
 )
 
 func TestDashboardModelInit(t *testing.T) {
@@ -209,7 +211,7 @@ func TestFetchDataConcurrent(t *testing.T) {
 
 	// Strip the "http://" prefix to get just host:port for NewDecoClient.
 	host := strings.TrimPrefix(srv.URL, "http://")
-	dc := NewDecoClient(host, "testpassword")
+	dc := decoclient.NewDecoClient(host, "testpassword")
 
 	const goroutines = 10
 	var wg sync.WaitGroup

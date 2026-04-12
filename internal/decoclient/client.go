@@ -1,4 +1,4 @@
-package main
+package decoclient
 
 import (
 	"bytes"
@@ -19,6 +19,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jvreagan/deco/internal/decolog"
+	"github.com/jvreagan/deco/internal/paths"
 )
 
 const maxResponseSize = 10 * 1024 * 1024 // 10 MB
@@ -31,13 +34,13 @@ type Config struct {
 	Password string `json:"password"`
 }
 
-// sessionTimeout is the max age of an auth session before re-authentication.
+// SessionTimeout is the max age of an auth session before re-authentication.
 // The Deco router firmware typically expires sessions after 5 minutes.
-const sessionTimeout = 5 * time.Minute
+const SessionTimeout = 5 * time.Minute
 
-// minRequestInterval is the minimum time between consecutive API requests
+// MinRequestInterval is the minimum time between consecutive API requests
 // to avoid hammering the router. See issue #39.
-const minRequestInterval = 100 * time.Millisecond
+const MinRequestInterval = 100 * time.Millisecond
 
 // DecoClient is safe for concurrent use; a mutex serializes access to session state.
 type DecoClient struct {
@@ -65,10 +68,11 @@ type DecoClient struct {
 	seq   int
 }
 
-func loadConfig() (*Config, error) {
-	migrateIfNeeded()
+// LoadConfig reads the router config from the config directory.
+func LoadConfig() (*Config, error) {
+	paths.MigrateIfNeeded()
 
-	configFile := cfgPath("deco_config.json")
+	configFile := paths.CfgPath("deco_config.json")
 
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -78,7 +82,7 @@ func loadConfig() (*Config, error) {
 	// Warn if config file is world-readable
 	if info, statErr := os.Stat(configFile); statErr == nil {
 		if info.Mode().Perm()&0077 != 0 {
-			logWarn("config %s is readable by other users (mode %o). Consider: chmod 600 %s",
+			decolog.Warn("config %s is readable by other users (mode %o). Consider: chmod 600 %s",
 				configFile, info.Mode().Perm(), configFile)
 		}
 	}
@@ -90,8 +94,8 @@ func loadConfig() (*Config, error) {
 	return &config, nil
 }
 
-// validateConfig checks that the router is reachable with a quick TCP dial.
-func validateConfig(config *Config) error {
+// ValidateConfig checks that the router is reachable with a quick TCP dial.
+func ValidateConfig(config *Config) error {
 	host := config.Host
 	if !strings.Contains(host, ":") {
 		host = host + ":80"
@@ -104,6 +108,7 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
+// NewDecoClient creates a new DecoClient for the given host and password.
 func NewDecoClient(host, password string) *DecoClient {
 	jar, _ := cookiejar.New(nil) // cookiejar.New never returns an error with nil options
 	client := &http.Client{
@@ -136,11 +141,11 @@ func (dc *DecoClient) baseURL() string {
 func (dc *DecoClient) EnsureAuthorized() error {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
-	if dc.logged && time.Since(dc.lastAuthTime) < sessionTimeout {
+	if dc.logged && time.Since(dc.lastAuthTime) < SessionTimeout {
 		return nil
 	}
 	if dc.logged {
-		logDebug("session older than %s, re-authenticating", sessionTimeout)
+		decolog.Debug("session older than %s, re-authenticating", SessionTimeout)
 		dc.invalidate()
 	}
 	// Reset HTTP client to clear stale cookies
@@ -255,6 +260,7 @@ func (dc *DecoClient) getSignature(dataLen int, isLogin bool) (string, error) {
 	return rsaEncrypt(signData, dc.signN, dc.signE)
 }
 
+// Authorize performs the login handshake with the router.
 func (dc *DecoClient) Authorize() error {
 	// Get RSA keys
 	if err := dc.getPasswordKeys(); err != nil {
@@ -380,17 +386,17 @@ func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (
 
 // requestOnceUnlocked is the lock-free implementation of requestOnce; callers must hold dc.mu.
 func (dc *DecoClient) requestOnceUnlocked(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
-	// Rate limit: ensure at least minRequestInterval between consecutive requests
+	// Rate limit: ensure at least MinRequestInterval between consecutive requests
 	// to prevent hammering the router (issue #39).
 	if !dc.lastRequest.IsZero() {
-		if elapsed := time.Since(dc.lastRequest); elapsed < minRequestInterval {
-			time.Sleep(minRequestInterval - elapsed)
+		if elapsed := time.Since(dc.lastRequest); elapsed < MinRequestInterval {
+			time.Sleep(MinRequestInterval - elapsed)
 		}
 	}
 	dc.lastRequest = time.Now()
 
 	start := time.Now()
-	logDebug("POST %s", path)
+	decolog.Debug("POST %s", path)
 
 	jsonData, err := json.Marshal(reqData)
 	if err != nil {
@@ -437,7 +443,7 @@ func (dc *DecoClient) requestOnceUnlocked(path string, reqData map[string]interf
 		return nil, fmt.Errorf("failed to read response: %v", err)
 	}
 
-	logDebug("%s -> %d (%d bytes, %s)", path, resp.StatusCode, len(body), time.Since(start))
+	decolog.Debug("%s -> %d (%d bytes, %s)", path, resp.StatusCode, len(body), time.Since(start))
 
 	if len(body) == 0 {
 		return nil, fmt.Errorf("empty response from router")
@@ -475,7 +481,7 @@ func (dc *DecoClient) requestOnceUnlocked(path string, reqData map[string]interf
 
 	// Check for error_code in the decrypted response
 	if errCode, ok := decryptedResp["error_code"]; ok {
-		if code := toInt(errCode); code != 0 {
+		if code := ToInt(errCode); code != 0 {
 			return nil, fmt.Errorf("API error code: %d", code)
 		}
 	}
@@ -488,6 +494,7 @@ func (dc *DecoClient) requestOnceUnlocked(path string, reqData map[string]interf
 	return decryptedResp, nil
 }
 
+// Request sends an encrypted API request to the router.
 func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
 	if !dc.logged {
 		return nil, fmt.Errorf("not logged in")
@@ -509,12 +516,13 @@ func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[
 	return result, nil
 }
 
+// Logout sends a logout request to the router.
 func (dc *DecoClient) Logout() {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
 	if dc.logged {
 		if _, err := dc.requestOnceUnlocked("admin/system?form=logout", map[string]interface{}{"operation": "write"}); err != nil {
-			logDebug("logout request failed: %v", err)
+			decolog.Debug("logout request failed: %v", err)
 		}
 		dc.logged = false
 	}
@@ -522,6 +530,7 @@ func (dc *DecoClient) Logout() {
 
 // ==================== API METHODS ====================
 
+// GetClients returns the list of connected devices.
 func (dc *DecoClient) GetClients() (*ClientList, error) {
 	data, err := dc.Request("admin/client?form=client_list", map[string]interface{}{
 		"operation": "read",
@@ -570,12 +579,12 @@ func (dc *DecoClient) GetClients() (*ClientList, error) {
 
 			clients = append(clients, ClientInfo{
 				Name:         name,
-				IP:           toString(client["ip"]),
-				MAC:          toString(client["mac"]),
+				IP:           ToString(client["ip"]),
+				MAC:          ToString(client["mac"]),
 				Connection:   connType,
-				Type:         toString(client["client_type"]),
-				DownloadKbps: toInt(client["down_speed"]),
-				UploadKbps:   toInt(client["up_speed"]),
+				Type:         ToString(client["client_type"]),
+				DownloadKbps: ToInt(client["down_speed"]),
+				UploadKbps:   ToInt(client["up_speed"]),
 			})
 		}
 	}
@@ -596,6 +605,7 @@ func (dc *DecoClient) GetClients() (*ClientList, error) {
 	}, nil
 }
 
+// GetNetwork returns the network configuration (WAN, LAN, performance).
 func (dc *DecoClient) GetNetwork() (*NetworkInfo, error) {
 	data, err := dc.Request("admin/network?form=wan_ipv4", map[string]interface{}{"operation": "read"})
 	if err != nil {
@@ -604,36 +614,36 @@ func (dc *DecoClient) GetNetwork() (*NetworkInfo, error) {
 
 	perf, perfErr := dc.Request("admin/network?form=performance", map[string]interface{}{"operation": "read"})
 	if perfErr != nil {
-		logDebug("performance query failed: %v", perfErr)
+		decolog.Debug("performance query failed: %v", perfErr)
 	}
 
-	wan := getMap(data, "wan")
-	lan := getMap(data, "lan")
-	wanIP := getMap(wan, "ip_info")
-	lanIP := getMap(lan, "ip_info")
+	wan := GetMap(data, "wan")
+	lan := GetMap(data, "lan")
+	wanIP := GetMap(wan, "ip_info")
+	lanIP := GetMap(lan, "ip_info")
 
 	result := &NetworkInfo{
 		WAN: WANInfo{
-			IP:      toString(wanIP["ip"]),
-			Gateway: toString(wanIP["gateway"]),
-			Netmask: toString(wanIP["mask"]),
-			MAC:     toString(wanIP["mac"]),
-			DNS:     []string{toString(wanIP["dns1"]), toString(wanIP["dns2"])},
+			IP:      ToString(wanIP["ip"]),
+			Gateway: ToString(wanIP["gateway"]),
+			Netmask: ToString(wanIP["mask"]),
+			MAC:     ToString(wanIP["mac"]),
+			DNS:     []string{ToString(wanIP["dns1"]), ToString(wanIP["dns2"])},
 		},
 		LAN: LANInfo{
-			IP:      toString(lanIP["ip"]),
-			Netmask: toString(lanIP["mask"]),
-			MAC:     toString(lanIP["mac"]),
+			IP:      ToString(lanIP["ip"]),
+			Netmask: ToString(lanIP["mask"]),
+			MAC:     ToString(lanIP["mac"]),
 		},
 	}
 
 	if perf != nil {
 		if cpu, ok := perf["cpu_usage"]; ok && cpu != nil {
-			v := toFloat(cpu)
+			v := ToFloat(cpu)
 			result.Performance.CPUPercent = &v
 		}
 		if mem, ok := perf["mem_usage"]; ok && mem != nil {
-			v := toFloat(mem)
+			v := ToFloat(mem)
 			result.Performance.MemPercent = &v
 		}
 	}
@@ -641,6 +651,7 @@ func (dc *DecoClient) GetNetwork() (*NetworkInfo, error) {
 	return result, nil
 }
 
+// GetWireless returns the wireless configuration.
 func (dc *DecoClient) GetWireless() (*WirelessInfo, error) {
 	data, err := dc.Request("admin/wireless?form=wlan", map[string]interface{}{"operation": "read"})
 	if err != nil {
@@ -650,8 +661,8 @@ func (dc *DecoClient) GetWireless() (*WirelessInfo, error) {
 	bands := map[string]BandInfo{}
 
 	parseBand := func(bandData map[string]interface{}, bandName string) BandInfo {
-		host := getMap(bandData, "host")
-		guest := getMap(bandData, "guest")
+		host := GetMap(bandData, "host")
+		guest := GetMap(bandData, "guest")
 
 		ssid := ""
 		if s, ok := host["ssid"].(string); ok {
@@ -670,13 +681,13 @@ func (dc *DecoClient) GetWireless() (*WirelessInfo, error) {
 		return BandInfo{
 			Band: bandName,
 			Host: HostInfo{
-				Enabled:      toBool(host["enable"]),
+				Enabled:      ToBool(host["enable"]),
 				SSID:         ssid,
-				Channel:      toString(host["channel"]),
-				ChannelWidth: toString(host["channel_width"]),
+				Channel:      ToString(host["channel"]),
+				ChannelWidth: ToString(host["channel_width"]),
 			},
 			Guest: GuestInfo{
-				Enabled: toBool(guest["enable"]),
+				Enabled: ToBool(guest["enable"]),
 				SSID:    guestSSID,
 			},
 		}
@@ -695,6 +706,7 @@ func (dc *DecoClient) GetWireless() (*WirelessInfo, error) {
 	return &WirelessInfo{Bands: bands}, nil
 }
 
+// GetMesh returns the mesh topology.
 func (dc *DecoClient) GetMesh() (*MeshInfo, error) {
 	data, err := dc.Request("admin/device?form=device_list", map[string]interface{}{"operation": "read"})
 	if err != nil {
@@ -723,12 +735,12 @@ func (dc *DecoClient) GetMesh() (*MeshInfo, error) {
 
 			devices = append(devices, MeshDevice{
 				Name:     name,
-				Model:    toString(dev["device_model"]),
-				Role:     toString(dev["role"]),
-				IP:       toString(dev["device_ip"]),
-				MAC:      toString(dev["mac"]),
-				Firmware: toString(dev["software_ver"]),
-				Status:   toString(dev["inet_status"]),
+				Model:    ToString(dev["device_model"]),
+				Role:     ToString(dev["role"]),
+				IP:       ToString(dev["device_ip"]),
+				MAC:      ToString(dev["mac"]),
+				Firmware: ToString(dev["software_ver"]),
+				Status:   ToString(dev["inet_status"]),
 			})
 		}
 	}
@@ -739,6 +751,7 @@ func (dc *DecoClient) GetMesh() (*MeshInfo, error) {
 	}, nil
 }
 
+// Reboot sends a reboot command to the router.
 func (dc *DecoClient) Reboot() error {
 	_, err := dc.Request("admin/device?form=reboot", map[string]interface{}{
 		"operation": "reboot",
@@ -746,6 +759,7 @@ func (dc *DecoClient) Reboot() error {
 	return err
 }
 
+// BlockClient blocks a device by MAC address.
 func (dc *DecoClient) BlockClient(mac string) error {
 	_, err := dc.Request("admin/client?form=block", map[string]interface{}{
 		"operation": "write",
@@ -757,6 +771,7 @@ func (dc *DecoClient) BlockClient(mac string) error {
 	return err
 }
 
+// UnblockClient unblocks a device by MAC address.
 func (dc *DecoClient) UnblockClient(mac string) error {
 	_, err := dc.Request("admin/client?form=block", map[string]interface{}{
 		"operation": "write",

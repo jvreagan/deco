@@ -5,6 +5,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/jvreagan/deco/internal/decolog"
 )
 
 var version = "dev"
@@ -17,7 +19,7 @@ var rootCmd = &cobra.Command{
 	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		verbose, _ := cmd.Flags().GetBool("verbose")
-		SetVerbose(verbose)
+		decolog.SetVerbose(verbose)
 		return nil
 	},
 }

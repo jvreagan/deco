@@ -16,6 +16,9 @@ import (
 	"time"
 
 	"github.com/chzyer/readline"
+
+	"github.com/jvreagan/deco/internal/decolog"
+	"github.com/jvreagan/deco/internal/paths"
 )
 
 const defaultOllamaModel = "llama3.2"
@@ -351,7 +354,7 @@ func appendBandwidthHistory(sb *strings.Builder, db *sql.DB, aliases map[string]
 		}
 	}
 	if err := rows.Err(); err != nil {
-		logWarn("error iterating bandwidth rows: %v", err)
+		decolog.Warn("error iterating bandwidth rows: %v", err)
 	}
 	if len(entries) == 0 {
 		return
@@ -404,7 +407,7 @@ func appendNetworkHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr s
 		}
 	}
 	if err := rows.Err(); err != nil {
-		logWarn("error iterating network snapshots: %v", err)
+		decolog.Warn("error iterating network snapshots: %v", err)
 	}
 	if len(snaps) == 0 {
 		return
@@ -478,7 +481,7 @@ func appendMeshHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr stri
 		}
 	}
 	if err := rows.Err(); err != nil {
-		logWarn("error iterating mesh snapshots: %v", err)
+		decolog.Warn("error iterating mesh snapshots: %v", err)
 	}
 	if len(nodes) == 0 {
 		return
@@ -521,7 +524,7 @@ func appendKnownDevices(sb *strings.Builder, db *sql.DB, aliases map[string]stri
 		}
 	}
 	if err := rows.Err(); err != nil {
-		logWarn("error iterating known devices: %v", err)
+		decolog.Warn("error iterating known devices: %v", err)
 	}
 	if len(devs) == 0 {
 		return
@@ -673,7 +676,7 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 	}
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "you> ",
-		HistoryFile:     cfgPath("chat_history"),
+		HistoryFile:     paths.CfgPath("chat_history"),
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
 	})

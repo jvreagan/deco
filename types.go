@@ -1,93 +1,27 @@
 package main
 
-// ClientInfo represents a connected device
-type ClientInfo struct {
-	Name         string `json:"name"`
-	IP           string `json:"ip"`
-	MAC          string `json:"mac"`
-	Connection   string `json:"connection"`
-	Type         string `json:"type"`
-	DownloadKbps int    `json:"download_kbps"`
-	UploadKbps   int    `json:"upload_kbps"`
-}
+import "github.com/jvreagan/deco/internal/decoclient"
 
-// ClientList represents the result of GetClients
-type ClientList struct {
-	Clients []ClientInfo `json:"clients"`
-	Count   int          `json:"count"`
-}
+// Type aliases for API response types that moved to decoclient.
+type ClientInfo = decoclient.ClientInfo
+type ClientList = decoclient.ClientList
+type NetworkInfo = decoclient.NetworkInfo
+type WANInfo = decoclient.WANInfo
+type LANInfo = decoclient.LANInfo
+type PerformanceInfo = decoclient.PerformanceInfo
+type WirelessInfo = decoclient.WirelessInfo
+type BandInfo = decoclient.BandInfo
+type HostInfo = decoclient.HostInfo
+type GuestInfo = decoclient.GuestInfo
+type MeshInfo = decoclient.MeshInfo
+type MeshDevice = decoclient.MeshDevice
+type AllInfo = decoclient.AllInfo
 
-// NetworkInfo represents network configuration
-type NetworkInfo struct {
-	WAN         WANInfo         `json:"wan"`
-	LAN         LANInfo         `json:"lan"`
-	Performance PerformanceInfo `json:"performance"`
-}
+// Config and DecoClient aliases
+type Config = decoclient.Config
+type DecoClient = decoclient.DecoClient
 
-// WANInfo represents WAN configuration
-type WANInfo struct {
-	IP      string   `json:"ip"`
-	Gateway string   `json:"gateway"`
-	Netmask string   `json:"netmask"`
-	MAC     string   `json:"mac"`
-	DNS     []string `json:"dns"`
-}
-
-// LANInfo represents LAN configuration
-type LANInfo struct {
-	IP      string `json:"ip"`
-	Netmask string `json:"netmask"`
-	MAC     string `json:"mac"`
-}
-
-// PerformanceInfo represents router performance metrics
-type PerformanceInfo struct {
-	CPUPercent *float64 `json:"cpu_percent"`
-	MemPercent *float64 `json:"mem_percent"`
-}
-
-// WirelessInfo represents wireless configuration
-type WirelessInfo struct {
-	Bands map[string]BandInfo `json:"bands"`
-}
-
-// BandInfo represents a single wireless band
-type BandInfo struct {
-	Band  string    `json:"band"`
-	Host  HostInfo  `json:"host"`
-	Guest GuestInfo `json:"guest"`
-}
-
-// HostInfo represents host wireless settings
-type HostInfo struct {
-	Enabled      bool   `json:"enabled"`
-	SSID         string `json:"ssid"`
-	Channel      string `json:"channel"`
-	ChannelWidth string `json:"channel_width"`
-}
-
-// GuestInfo represents guest wireless settings
-type GuestInfo struct {
-	Enabled bool   `json:"enabled"`
-	SSID    string `json:"ssid"`
-}
-
-// MeshInfo represents mesh topology
-type MeshInfo struct {
-	Devices []MeshDevice `json:"devices"`
-	Count   int          `json:"count"`
-}
-
-// MeshDevice represents a single mesh node
-type MeshDevice struct {
-	Name     string `json:"name"`
-	Model    string `json:"model"`
-	Role     string `json:"role"`
-	IP       string `json:"ip"`
-	MAC      string `json:"mac"`
-	Firmware string `json:"firmware"`
-	Status   string `json:"status"`
-}
+// Report/webhook types stay in package main
 
 // ReportDevice represents a device in a bandwidth report
 type ReportDevice struct {
@@ -204,14 +138,4 @@ type DeviceReport struct {
 	Timeline        []DeviceTimelineBucket      `json:"timeline"`
 	Connections     []DeviceConnectionBreakdown `json:"connections"`
 	IPHistory       []DeviceIPHistory           `json:"ip_history"`
-}
-
-// AllInfo represents a complete network snapshot
-type AllInfo struct {
-	Timestamp string       `json:"timestamp"`
-	Router    string       `json:"router"`
-	Network   *NetworkInfo `json:"network"`
-	Wireless  *WirelessInfo `json:"wireless"`
-	Mesh      *MeshInfo    `json:"mesh"`
-	Clients   *ClientList  `json:"clients"`
 }

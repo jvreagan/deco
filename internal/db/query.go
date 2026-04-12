@@ -1,0 +1,168 @@
+package db
+
+import (
+	"database/sql"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/jvreagan/deco/internal/decolog"
+)
+
+// AllTables lists all data tables in the database.
+var AllTables = []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
+
+// ValidPeriods defines the set of accepted period strings for reports.
+var ValidPeriods = map[string]bool{
+	"today": true,
+	"hour":  true,
+	"1h":    true,
+	"6h":    true,
+	"12h":   true,
+	"24h":   true,
+	"7d":    true,
+	"30d":   true,
+	"all":   true,
+}
+
+// ParsePeriod converts a period string to a start time and display name.
+func ParsePeriod(period string) (time.Time, string, error) {
+	switch period {
+	case "today":
+		now := time.Now()
+		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()), "Today", nil
+	case "hour", "1h":
+		return time.Now().Add(-1 * time.Hour), "Last hour", nil
+	case "6h":
+		return time.Now().Add(-6 * time.Hour), "Last 6 hours", nil
+	case "12h":
+		return time.Now().Add(-12 * time.Hour), "Last 12 hours", nil
+	case "24h":
+		return time.Now().Add(-24 * time.Hour), "Last 24 hours", nil
+	case "7d":
+		return time.Now().AddDate(0, 0, -7), "Last 7 days", nil
+	case "30d":
+		return time.Now().AddDate(0, 0, -30), "Last 30 days", nil
+	case "all":
+		return time.Time{}, "All time", nil
+	default:
+		return time.Time{}, "", fmt.Errorf("unrecognized period %q", period)
+	}
+}
+
+// ValidatePeriod returns an error if the given period string is not recognized.
+func ValidatePeriod(period string) error {
+	if !ValidPeriods[period] {
+		return fmt.Errorf("unknown period %q; valid periods: today, hour, 1h, 6h, 12h, 24h, 7d, 30d, all", period)
+	}
+	return nil
+}
+
+// CachedInterval caches the result of EstimateInterval to avoid redundant queries.
+var CachedInterval struct {
+	Since time.Time
+	Val   int
+	Set   bool
+}
+
+// EstimateInterval derives the polling interval from sample timestamps.
+// Returns the median gap between consecutive distinct timestamps, or 5 as fallback.
+func EstimateInterval(database *sql.DB, since time.Time) int {
+	if CachedInterval.Set && CachedInterval.Since.Equal(since) {
+		return CachedInterval.Val
+	}
+	rows, err := database.Query(`SELECT DISTINCT timestamp FROM bandwidth_samples
+		WHERE timestamp >= ? ORDER BY timestamp LIMIT 20`, since.Format(time.RFC3339))
+	if err != nil {
+		return 5
+	}
+	defer rows.Close()
+
+	var timestamps []time.Time
+	for rows.Next() {
+		var ts string
+		if err := rows.Scan(&ts); err == nil {
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				timestamps = append(timestamps, t)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 5
+	}
+
+	if len(timestamps) < 2 {
+		return 5
+	}
+
+	var gaps []int
+	for i := 1; i < len(timestamps); i++ {
+		gap := int(timestamps[i].Sub(timestamps[i-1]).Seconds())
+		if gap > 0 {
+			gaps = append(gaps, gap)
+		}
+	}
+	if len(gaps) == 0 {
+		return 5
+	}
+
+	sort.Ints(gaps)
+	result := gaps[len(gaps)/2] // median
+	CachedInterval.Since = since
+	CachedInterval.Val = result
+	CachedInterval.Set = true
+	return result
+}
+
+// LoadKnownMACs returns a set of all distinct MACs seen in the bandwidth_samples table.
+func LoadKnownMACs(database *sql.DB) map[string]bool {
+	known := map[string]bool{}
+	rows, err := database.Query("SELECT DISTINCT mac FROM bandwidth_samples")
+	if err != nil {
+		return known
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var mac string
+		if err := rows.Scan(&mac); err == nil {
+			known[strings.ToUpper(mac)] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		decolog.Warn("error iterating known MACs: %v", err)
+	}
+	return known
+}
+
+// CountBeforeDate returns the total number of records across all tables before the cutoff.
+func CountBeforeDate(database *sql.DB, cutoff time.Time) (int64, error) {
+	cutoffStr := cutoff.Format(time.RFC3339)
+	var total int64
+	for _, table := range AllTables {
+		var c int64
+		if err := database.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE timestamp < ?", cutoffStr).Scan(&c); err != nil {
+			return total, err
+		}
+		total += c
+	}
+	return total, nil
+}
+
+// PurgeByDate deletes all records before the cutoff across all tables.
+func PurgeByDate(database *sql.DB, cutoff time.Time) (int64, error) {
+	cutoffStr := cutoff.Format(time.RFC3339)
+	var total int64
+	for _, table := range AllTables {
+		result, err := database.Exec("DELETE FROM "+table+" WHERE timestamp < ?", cutoffStr)
+		if err != nil {
+			return total, fmt.Errorf("error deleting from %s: %v", table, err)
+		}
+		n, _ := result.RowsAffected()
+		total += n
+	}
+	if _, err := database.Exec("VACUUM"); err != nil {
+		decolog.Warn("VACUUM failed: %v", err)
+	}
+	return total, nil
+}

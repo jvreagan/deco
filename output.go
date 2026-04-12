@@ -6,12 +6,15 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/jvreagan/deco/internal/decoclient"
+	"github.com/jvreagan/deco/internal/decolog"
 )
 
 func printJSON(data interface{}) {
 	out, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		logError("Error marshaling JSON: %v", err)
+		decolog.Error("Error marshaling JSON: %v", err)
 		return
 	}
 	fmt.Println(string(out))
@@ -432,52 +435,9 @@ func formatBytes(kb float64) string {
 	return fmt.Sprintf("%.2f GB", kb/(1024*1024))
 }
 
-func getMap(data map[string]interface{}, key string) map[string]interface{} {
-	if v, ok := data[key].(map[string]interface{}); ok {
-		return v
-	}
-	return map[string]interface{}{}
-}
-
-func toInt(v interface{}) int {
-	switch val := v.(type) {
-	case int:
-		return val
-	case int64:
-		return int(val)
-	case float64:
-		return int(val)
-	default:
-		return 0
-	}
-}
-
-func toFloat(v interface{}) float64 {
-	switch val := v.(type) {
-	case float64:
-		return val
-	case int:
-		return float64(val)
-	case int64:
-		return float64(val)
-	default:
-		return 0
-	}
-}
-
-func toString(v interface{}) string {
-	if v == nil {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return fmt.Sprintf("%v", v)
-}
-
-func toBool(v interface{}) bool {
-	if b, ok := v.(bool); ok {
-		return b
-	}
-	return false
-}
+// Thin wrappers delegating to decoclient helpers.
+func getMap(data map[string]interface{}, key string) map[string]interface{} { return decoclient.GetMap(data, key) }
+func toInt(v interface{}) int       { return decoclient.ToInt(v) }
+func toFloat(v interface{}) float64 { return decoclient.ToFloat(v) }
+func toString(v interface{}) string { return decoclient.ToString(v) }
+func toBool(v interface{}) bool     { return decoclient.ToBool(v) }

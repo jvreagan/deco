@@ -10,13 +10,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/jvreagan/deco/internal/decoclient"
+	"github.com/jvreagan/deco/internal/paths"
 )
 
 // ==================== MAC VALIDATION TESTS ====================
@@ -170,74 +172,7 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
-// ==================== LOGGER TESTS ====================
-
-func TestSetVerbose(t *testing.T) {
-	origLevel := logLevel.Load()
-	defer func() { logLevel.Store(origLevel) }()
-
-	logLevel.Store(int32(LevelWarn))
-	SetVerbose(true)
-	if logLevel.Load() != int32(LevelDebug) {
-		t.Errorf("SetVerbose(true): logLevel = %d, want %d", logLevel.Load(), LevelDebug)
-	}
-
-	// SetVerbose(false) should not change level
-	logLevel.Store(int32(LevelWarn))
-	SetVerbose(false)
-	if logLevel.Load() != int32(LevelWarn) {
-		t.Errorf("SetVerbose(false): logLevel = %d, want %d", logLevel.Load(), LevelWarn)
-	}
-}
-
-func TestLogLevels(t *testing.T) {
-	origLevel := logLevel.Load()
-	defer func() { logLevel.Store(origLevel) }()
-
-	// Capture stderr
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-	t.Cleanup(func() { os.Stderr = oldStderr })
-
-	// At default level (Warn), debug should be hidden
-	logLevel.Store(int32(LevelWarn))
-	logDebug("hidden message")
-	logWarn("visible warning")
-
-	w.Close()
-	os.Stderr = oldStderr
-
-	var buf [4096]byte
-	n, _ := r.Read(buf[:])
-	output := string(buf[:n])
-
-	if strings.Contains(output, "hidden message") {
-		t.Error("debug message should be hidden at Warn level")
-	}
-	if !strings.Contains(output, "visible warning") {
-		t.Error("warn message should be visible at Warn level")
-	}
-
-	// At debug level, debug should be visible
-	r2, w2, _ := os.Pipe()
-	os.Stderr = w2
-	t.Cleanup(func() { os.Stderr = oldStderr })
-
-	logLevel.Store(int32(LevelDebug))
-	logDebug("now visible")
-
-	w2.Close()
-	os.Stderr = oldStderr
-
-	var buf2 [4096]byte
-	n2, _ := r2.Read(buf2[:])
-	output2 := string(buf2[:n2])
-
-	if !strings.Contains(output2, "now visible") {
-		t.Error("debug message should be visible at Debug level")
-	}
-}
+// Logger tests are in internal/decolog/decolog_test.go
 
 // ==================== COBRA CLI TESTS ====================
 
@@ -312,11 +247,11 @@ func testEnv(t *testing.T) string {
 	t.Cleanup(func() { setDBPath(origDBPath) })
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-	setDBPath(cfgPath("network_usage.db"))
+	setDBPath(paths.CfgPath("network_usage.db"))
 	return tmpDir
 }
 
-// ==================== DATABASE SCHEMA TESTS ====================
+// Database schema tests moved to internal/db/db_test.go
 
 // TODO(#23): Many tests in this file capture stdout by reassigning os.Stdout
 // (e.g., `old := os.Stdout; os.Stdout = w; ... os.Stdout = old`). This is
@@ -343,301 +278,6 @@ func setupTestDB(t *testing.T) *sql.DB {
 
 	return db
 }
-
-func TestDBMigrationVersion(t *testing.T) {
-	db := setupTestDB(t)
-
-	version, err := getSchemaVersion(db)
-	if err != nil {
-		t.Fatalf("getSchemaVersion failed: %v", err)
-	}
-	if version != currentSchemaVersion {
-		t.Errorf("schema version = %d, want %d", version, currentSchemaVersion)
-	}
-}
-
-func TestDBMigrationIdempotent(t *testing.T) {
-	db := setupTestDB(t)
-
-	// Running migrations again on an already-migrated DB should be a no-op
-	if err := runMigrations(db); err != nil {
-		t.Fatalf("re-running migrations failed: %v", err)
-	}
-
-	version, _ := getSchemaVersion(db)
-	if version != currentSchemaVersion {
-		t.Errorf("schema version after re-migration = %d, want %d", version, currentSchemaVersion)
-	}
-}
-
-func TestDBSchemaTablesExist(t *testing.T) {
-	db := setupTestDB(t)
-
-	tables := []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
-	for _, table := range tables {
-		t.Run(table, func(t *testing.T) {
-			var name string
-			err := db.QueryRow(
-				"SELECT name FROM sqlite_master WHERE type='table' AND name=?", table,
-			).Scan(&name)
-			if err != nil {
-				t.Errorf("table %q not found: %v", table, err)
-			}
-		})
-	}
-}
-
-func TestDBSchemaColumns(t *testing.T) {
-	db := setupTestDB(t)
-
-	expected := map[string][]string{
-		"bandwidth_samples": {"id", "timestamp", "mac", "name", "ip", "connection", "device_type", "download_kbps", "upload_kbps"},
-		"network_snapshots": {"id", "timestamp", "wan_ip", "wan_gateway", "wan_dns1", "wan_dns2", "lan_ip", "lan_netmask", "cpu_percent", "mem_percent"},
-		"mesh_snapshots":    {"id", "timestamp", "name", "role", "ip", "mac", "model", "firmware", "status"},
-		"wireless_snapshots": {"id", "timestamp", "band", "ssid", "channel", "channel_width", "host_enabled", "guest_enabled", "guest_ssid"},
-	}
-
-	for table, wantCols := range expected {
-		t.Run(table, func(t *testing.T) {
-			rows, err := db.Query("PRAGMA table_info(" + table + ")")
-			if err != nil {
-				t.Fatalf("PRAGMA table_info failed: %v", err)
-			}
-			defer rows.Close()
-
-			gotCols := map[string]bool{}
-			for rows.Next() {
-				var cid int
-				var name, ctype string
-				var notnull int
-				var dflt *string
-				var pk int
-				if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-					t.Fatalf("scan failed: %v", err)
-				}
-				gotCols[name] = true
-			}
-
-			for _, col := range wantCols {
-				if !gotCols[col] {
-					t.Errorf("table %q missing column %q", table, col)
-				}
-			}
-		})
-	}
-}
-
-func TestDBSchemaIndexes(t *testing.T) {
-	db := setupTestDB(t)
-
-	expectedIndexes := []string{
-		"idx_timestamp",
-		"idx_mac",
-		"idx_net_timestamp",
-		"idx_mesh_timestamp",
-		"idx_wireless_timestamp",
-	}
-
-	for _, idx := range expectedIndexes {
-		t.Run(idx, func(t *testing.T) {
-			var name string
-			err := db.QueryRow(
-				"SELECT name FROM sqlite_master WHERE type='index' AND name=?", idx,
-			).Scan(&name)
-			if err != nil {
-				t.Errorf("index %q not found: %v", idx, err)
-			}
-		})
-	}
-}
-
-func TestDBInitIdempotent(t *testing.T) {
-	testEnv(t)
-
-	db1, err := initDB()
-	if err != nil {
-		t.Fatalf("first initDB failed: %v", err)
-	}
-	db1.Close()
-
-	db2, err := initDB()
-	if err != nil {
-		t.Fatalf("second initDB failed: %v", err)
-	}
-	db2.Close()
-}
-
-// ==================== DATABASE INSERTION + QUERY TESTS ====================
-
-func TestDBBandwidthSamplesRoundTrip(t *testing.T) {
-	db := setupTestDB(t)
-	ts := time.Now().UTC().Format("2006-01-02 15:04:05")
-
-	_, err := db.Exec(
-		`INSERT INTO bandwidth_samples (timestamp, mac, name, ip, connection, device_type, download_kbps, upload_kbps)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		ts, "AA-BB-CC-DD-EE-FF", "TestDevice", "192.168.68.100", "wireless", "phone", 1500, 300,
-	)
-	if err != nil {
-		t.Fatalf("insert failed: %v", err)
-	}
-
-	var mac, name, ip, conn, dtype string
-	var dl, ul int
-	err = db.QueryRow(
-		"SELECT mac, name, ip, connection, device_type, download_kbps, upload_kbps FROM bandwidth_samples WHERE mac=?",
-		"AA-BB-CC-DD-EE-FF",
-	).Scan(&mac, &name, &ip, &conn, &dtype, &dl, &ul)
-	if err != nil {
-		t.Fatalf("query failed: %v", err)
-	}
-
-	if mac != "AA-BB-CC-DD-EE-FF" || name != "TestDevice" || ip != "192.168.68.100" ||
-		conn != "wireless" || dtype != "phone" || dl != 1500 || ul != 300 {
-		t.Errorf("round-trip mismatch: got mac=%s name=%s ip=%s conn=%s type=%s dl=%d ul=%d",
-			mac, name, ip, conn, dtype, dl, ul)
-	}
-}
-
-func TestDBNetworkSnapshotsRoundTrip(t *testing.T) {
-	db := setupTestDB(t)
-	ts := time.Now().UTC().Format("2006-01-02 15:04:05")
-
-	_, err := db.Exec(
-		`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ts, "1.2.3.4", "1.2.3.1", "8.8.8.8", "8.8.4.4", "192.168.68.1", "255.255.255.0", 12.5, 45.3,
-	)
-	if err != nil {
-		t.Fatalf("insert failed: %v", err)
-	}
-
-	var wanIP, wanGW, dns1, dns2, lanIP, lanMask string
-	var cpu, mem float64
-	err = db.QueryRow(
-		"SELECT wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent FROM network_snapshots WHERE timestamp=?", ts,
-	).Scan(&wanIP, &wanGW, &dns1, &dns2, &lanIP, &lanMask, &cpu, &mem)
-	if err != nil {
-		t.Fatalf("query failed: %v", err)
-	}
-
-	if wanIP != "1.2.3.4" || wanGW != "1.2.3.1" || dns1 != "8.8.8.8" || dns2 != "8.8.4.4" ||
-		lanIP != "192.168.68.1" || lanMask != "255.255.255.0" || cpu != 12.5 || mem != 45.3 {
-		t.Errorf("round-trip mismatch: got %s %s %s %s %s %s %f %f",
-			wanIP, wanGW, dns1, dns2, lanIP, lanMask, cpu, mem)
-	}
-}
-
-func TestDBMeshSnapshotsRoundTrip(t *testing.T) {
-	db := setupTestDB(t)
-	ts := time.Now().UTC().Format("2006-01-02 15:04:05")
-
-	_, err := db.Exec(
-		`INSERT INTO mesh_snapshots (timestamp, name, role, ip, mac, model, firmware, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		ts, "Main", "master", "192.168.68.1", "8C-90-2D-B5-5F-86", "Deco BE63", "1.2.10", "online",
-	)
-	if err != nil {
-		t.Fatalf("insert failed: %v", err)
-	}
-
-	var name, role, ip, mac, model, fw, status string
-	err = db.QueryRow(
-		"SELECT name, role, ip, mac, model, firmware, status FROM mesh_snapshots WHERE timestamp=?", ts,
-	).Scan(&name, &role, &ip, &mac, &model, &fw, &status)
-	if err != nil {
-		t.Fatalf("query failed: %v", err)
-	}
-
-	if name != "Main" || role != "master" || ip != "192.168.68.1" ||
-		mac != "8C-90-2D-B5-5F-86" || model != "Deco BE63" || fw != "1.2.10" || status != "online" {
-		t.Errorf("round-trip mismatch: got %s %s %s %s %s %s %s",
-			name, role, ip, mac, model, fw, status)
-	}
-}
-
-func TestDBWirelessSnapshotsRoundTrip(t *testing.T) {
-	db := setupTestDB(t)
-	ts := time.Now().UTC().Format("2006-01-02 15:04:05")
-
-	_, err := db.Exec(
-		`INSERT INTO wireless_snapshots (timestamp, band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		ts, "5GHz", "MyNetwork", "149", "80MHz", 1, 0, "MyNetwork_Guest",
-	)
-	if err != nil {
-		t.Fatalf("insert failed: %v", err)
-	}
-
-	var band, ssid, ch, chw, guestSSID string
-	var hostEn, guestEn int
-	err = db.QueryRow(
-		"SELECT band, ssid, channel, channel_width, host_enabled, guest_enabled, guest_ssid FROM wireless_snapshots WHERE timestamp=?", ts,
-	).Scan(&band, &ssid, &ch, &chw, &hostEn, &guestEn, &guestSSID)
-	if err != nil {
-		t.Fatalf("query failed: %v", err)
-	}
-
-	if band != "5GHz" || ssid != "MyNetwork" || ch != "149" || chw != "80MHz" ||
-		hostEn != 1 || guestEn != 0 || guestSSID != "MyNetwork_Guest" {
-		t.Errorf("round-trip mismatch: got %s %s %s %s %d %d %s",
-			band, ssid, ch, chw, hostEn, guestEn, guestSSID)
-	}
-}
-
-func TestDBCrossTableCorrelation(t *testing.T) {
-	db := setupTestDB(t)
-	ts := time.Now().UTC().Format("2006-01-02 15:04:05")
-
-	// Insert a row into each table with the same timestamp
-	_, err := db.Exec(
-		`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
-		ts, "AA-BB-CC-DD-EE-FF", "TestDev", 100, 50,
-	)
-	if err != nil {
-		t.Fatalf("bandwidth insert failed: %v", err)
-	}
-
-	_, err = db.Exec(
-		`INSERT INTO network_snapshots (timestamp, wan_ip, cpu_percent, mem_percent) VALUES (?, ?, ?, ?)`,
-		ts, "1.2.3.4", 10.0, 20.0,
-	)
-	if err != nil {
-		t.Fatalf("network insert failed: %v", err)
-	}
-
-	_, err = db.Exec(
-		`INSERT INTO mesh_snapshots (timestamp, name, role, status) VALUES (?, ?, ?, ?)`,
-		ts, "Main", "master", "online",
-	)
-	if err != nil {
-		t.Fatalf("mesh insert failed: %v", err)
-	}
-
-	_, err = db.Exec(
-		`INSERT INTO wireless_snapshots (timestamp, band, ssid) VALUES (?, ?, ?)`,
-		ts, "5GHz", "TestNet",
-	)
-	if err != nil {
-		t.Fatalf("wireless insert failed: %v", err)
-	}
-
-	// Query each table by the shared timestamp — all should return exactly 1 row
-	tables := []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
-	for _, table := range tables {
-		t.Run(table, func(t *testing.T) {
-			var count int
-			err := db.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE timestamp=?", ts).Scan(&count)
-			if err != nil {
-				t.Fatalf("query failed: %v", err)
-			}
-			if count != 1 {
-				t.Errorf("expected 1 row in %s for timestamp %s, got %d", table, ts, count)
-			}
-		})
-	}
-}
-
 // ==================== OUTPUT TESTS ====================
 
 func TestPrintClientsTable(t *testing.T) {
@@ -878,7 +518,7 @@ func TestLoadConfigMissing(t *testing.T) {
 	os.Chdir(tmpDir)
 	defer os.Chdir(origDir)
 
-	_, err := loadConfig()
+	_, err := decoclient.LoadConfig()
 	if err == nil {
 		t.Error("loadConfig should fail when no config file exists")
 	}
@@ -904,321 +544,7 @@ func TestLoadSaveAliases(t *testing.T) {
 	}
 }
 
-// ==================== DB PRUNE + CAPACITY TESTS ====================
-
-func TestCheckDBSizeLimit(t *testing.T) {
-	// With the test DB, it should be well within limits
-	_ = setupTestDB(t)
-
-	ok, size := checkDBSizeLimit()
-	if !ok {
-		t.Errorf("checkDBSizeLimit should return true for small DB, got false (size=%d)", size)
-	}
-}
-
-func TestPruneOlderThan(t *testing.T) {
-	db := setupTestDB(t)
-
-	// Insert old records (60 days ago)
-	oldTS := time.Now().AddDate(0, 0, -60).Format(time.RFC3339)
-	newTS := time.Now().Format(time.RFC3339)
-
-	// Insert into all 4 tables
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
-		oldTS, "AA-BB-CC-DD-EE-FF", "OldDevice", 100, 50)
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
-		newTS, "AA-BB-CC-DD-EE-FF", "NewDevice", 200, 100)
-
-	db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip) VALUES (?, ?)`, oldTS, "1.2.3.4")
-	db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip) VALUES (?, ?)`, newTS, "1.2.3.4")
-
-	db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role) VALUES (?, ?, ?)`, oldTS, "Main", "master")
-	db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role) VALUES (?, ?, ?)`, newTS, "Main", "master")
-
-	db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid) VALUES (?, ?, ?)`, oldTS, "5GHz", "Net")
-	db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid) VALUES (?, ?, ?)`, newTS, "5GHz", "Net")
-
-	// Prune records older than 30 days
-	err := pruneOlderThan(db, 30)
-	if err != nil {
-		t.Fatalf("pruneOlderThan failed: %v", err)
-	}
-
-	// Verify only new records remain in each table
-	tables := []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
-	for _, table := range tables {
-		var count int
-		db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count)
-		if count != 1 {
-			t.Errorf("expected 1 row in %s after prune, got %d", table, count)
-		}
-	}
-}
-
-func TestSelectivePurge(t *testing.T) {
-	db := setupTestDB(t)
-
-	// Insert records spanning multiple dates
-	dates := []string{
-		time.Now().AddDate(0, 0, -10).Format(time.RFC3339),
-		time.Now().AddDate(0, 0, -5).Format(time.RFC3339),
-		time.Now().Format(time.RFC3339),
-	}
-
-	for _, ts := range dates {
-		db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
-			ts, "AA-BB-CC-DD-EE-FF", "Device", 100, 50)
-	}
-
-	// Prune records older than 7 days (should delete the -10 day record)
-	err := pruneOlderThan(db, 7)
-	if err != nil {
-		t.Fatalf("pruneOlderThan failed: %v", err)
-	}
-
-	var count int
-	db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&count)
-	if count != 2 {
-		t.Errorf("expected 2 rows after prune (7 days), got %d", count)
-	}
-}
-
-// ==================== CONFIG PATH TESTS ====================
-
-func TestConfigDir(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-	got := configDir()
-	want := filepath.Join(tmpDir, "deco")
-	if got != want {
-		t.Errorf("configDir() = %q, want %q", got, want)
-	}
-}
-
-func TestConfigDirDefault(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "")
-	got := configDir()
-	home, _ := os.UserHomeDir()
-	want := filepath.Join(home, ".config", "deco")
-	if got != want {
-		t.Errorf("configDir() = %q, want %q", got, want)
-	}
-}
-
-func TestCfgPath(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-	got := cfgPath("foo.json")
-	want := filepath.Join(tmpDir, "deco", "foo.json")
-	if got != want {
-		t.Errorf("cfgPath(\"foo.json\") = %q, want %q", got, want)
-	}
-}
-
-func TestMigrateIfNeeded(t *testing.T) {
-	// Create a temp dir to serve as XDG_CONFIG_HOME
-	tmpDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	// Create a legacy file in a "legacy" directory simulating cwd
-	legacyDir := t.TempDir()
-	origDir, _ := os.Getwd()
-	os.Chdir(legacyDir)
-	defer os.Chdir(origDir)
-
-	os.WriteFile("deco_config.json", []byte(`{"host":"1.2.3.4"}`), 0600)
-
-	migrateIfNeeded()
-
-	// Verify file moved to new location
-	newPath := cfgPath("deco_config.json")
-	if _, err := os.Stat(newPath); os.IsNotExist(err) {
-		t.Errorf("expected file at %s after migration", newPath)
-	}
-	// Verify old file is gone
-	if _, err := os.Stat("deco_config.json"); !os.IsNotExist(err) {
-		t.Error("legacy file should be removed after migration")
-	}
-}
-
-// ==================== PARSE PERIOD TESTS ====================
-
-func TestParsePeriod(t *testing.T) {
-	tests := []struct {
-		input    string
-		wantName string
-		wantErr  bool
-	}{
-		{"today", "Today", false},
-		{"hour", "Last hour", false},
-		{"all", "All time", false},
-		{"", "", true},
-		{"bogus", "", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			startTime, name, err := parsePeriod(tt.input)
-			if tt.wantErr {
-				if err == nil {
-					t.Errorf("parsePeriod(%q) expected error, got nil", tt.input)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parsePeriod(%q) unexpected error: %v", tt.input, err)
-			}
-			if name != tt.wantName {
-				t.Errorf("parsePeriod(%q) name = %q, want %q", tt.input, name, tt.wantName)
-			}
-			if tt.input == "today" {
-				now := time.Now()
-				want := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-				if !startTime.Equal(want) {
-					t.Errorf("parsePeriod(\"today\") startTime = %v, want %v", startTime, want)
-				}
-			}
-			if tt.input == "hour" {
-				if time.Since(startTime) > 61*time.Minute || time.Since(startTime) < 59*time.Minute {
-					t.Errorf("parsePeriod(\"hour\") startTime should be ~1 hour ago, got %v", startTime)
-				}
-			}
-			if tt.input == "all" {
-				if !startTime.IsZero() {
-					t.Errorf("parsePeriod(%q) startTime should be zero, got %v", tt.input, startTime)
-				}
-			}
-		})
-	}
-}
-
-// ==================== PURGE BY DATE INTEGRATION TESTS ====================
-
-func TestPurgeByDaysIntegration(t *testing.T) {
-	db := setupTestDB(t)
-
-	// Insert records at 3 different timestamps: 20 days ago, 5 days ago, now
-	ts20 := time.Now().AddDate(0, 0, -20).Format(time.RFC3339)
-	ts5 := time.Now().AddDate(0, 0, -5).Format(time.RFC3339)
-	tsNow := time.Now().Format(time.RFC3339)
-
-	for _, ts := range []string{ts20, ts5, tsNow} {
-		db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
-			ts, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
-		db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip) VALUES (?, ?)`, ts, "1.2.3.4")
-		db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role) VALUES (?, ?, ?)`, ts, "Main", "master")
-		db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid) VALUES (?, ?, ?)`, ts, "5GHz", "Net")
-	}
-
-	cutoff := time.Now().AddDate(0, 0, -7)
-	deleted, err := purgeByDate(db, cutoff)
-	if err != nil {
-		t.Fatalf("purgeByDate failed: %v", err)
-	}
-
-	// Should have deleted 1 record per table (the 20-day-old one)
-	if deleted != 4 {
-		t.Errorf("purgeByDate deleted %d records, want 4", deleted)
-	}
-
-	// Verify 2 records remain in each table
-	for _, table := range allTables {
-		var count int
-		db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count)
-		if count != 2 {
-			t.Errorf("expected 2 rows in %s after purge, got %d", table, count)
-		}
-	}
-}
-
-func TestPurgeByDatePreservesRecent(t *testing.T) {
-	db := setupTestDB(t)
-
-	// Only insert recent records
-	tsNow := time.Now().Format(time.RFC3339)
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
-		tsNow, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
-
-	cutoff := time.Now().AddDate(0, 0, -7)
-	deleted, err := purgeByDate(db, cutoff)
-	if err != nil {
-		t.Fatalf("purgeByDate failed: %v", err)
-	}
-	if deleted != 0 {
-		t.Errorf("purgeByDate deleted %d records, want 0 (all recent)", deleted)
-	}
-
-	var count int
-	db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&count)
-	if count != 1 {
-		t.Errorf("expected 1 row preserved, got %d", count)
-	}
-}
-
-func TestPurgeByDateEmptyDB(t *testing.T) {
-	db := setupTestDB(t)
-	cutoff := time.Now().AddDate(0, 0, -7)
-	deleted, err := purgeByDate(db, cutoff)
-	if err != nil {
-		t.Fatalf("purgeByDate on empty DB failed: %v", err)
-	}
-	if deleted != 0 {
-		t.Errorf("purgeByDate on empty DB deleted %d records, want 0", deleted)
-	}
-}
-
-func TestPurgeByDateAllTables(t *testing.T) {
-	db := setupTestDB(t)
-
-	oldTS := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
-
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
-		oldTS, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
-	db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip) VALUES (?, ?)`, oldTS, "1.2.3.4")
-	db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role) VALUES (?, ?, ?)`, oldTS, "Main", "master")
-	db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid) VALUES (?, ?, ?)`, oldTS, "5GHz", "Net")
-
-	cutoff := time.Now().AddDate(0, 0, -7)
-	deleted, err := purgeByDate(db, cutoff)
-	if err != nil {
-		t.Fatalf("purgeByDate failed: %v", err)
-	}
-	if deleted != 4 {
-		t.Errorf("purgeByDate deleted %d records, want 4 (1 per table)", deleted)
-	}
-
-	for _, table := range allTables {
-		var count int
-		db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count)
-		if count != 0 {
-			t.Errorf("expected 0 rows in %s after full purge, got %d", table, count)
-		}
-	}
-}
-
-// ==================== KNOWN MACS TESTS ====================
-
-func TestLoadKnownMACs(t *testing.T) {
-	db := setupTestDB(t)
-
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
-		time.Now().Format(time.RFC3339), "AA-BB-CC-DD-EE-FF", "Dev1", 100, 50)
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
-		time.Now().Format(time.RFC3339), "11-22-33-44-55-66", "Dev2", 200, 100)
-	// Duplicate MAC
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps) VALUES (?, ?, ?, ?, ?)`,
-		time.Now().Format(time.RFC3339), "AA-BB-CC-DD-EE-FF", "Dev1Again", 50, 25)
-
-	known := loadKnownMACs(db)
-	if len(known) != 2 {
-		t.Errorf("loadKnownMACs returned %d MACs, want 2", len(known))
-	}
-	if !known["AA-BB-CC-DD-EE-FF"] {
-		t.Error("missing AA-BB-CC-DD-EE-FF in known MACs")
-	}
-	if !known["11-22-33-44-55-66"] {
-		t.Error("missing 11-22-33-44-55-66 in known MACs")
-	}
-}
+// DB prune, capacity, parsePeriod, purgeByDate, loadKnownMACs tests moved to internal/db/db_test.go
 
 func TestNotifyNewMAC(t *testing.T) {
 	t.Run("no webhook URL does not panic", func(t *testing.T) {
@@ -1501,8 +827,8 @@ func TestPurgeUsesInitDB(t *testing.T) {
 	testEnv(t)
 
 	// Create an empty DB file (no tables) — runPurge with initDB should handle it
-	dbFile := cfgPath("network_usage.db")
-	if err := ensureConfigDir(); err != nil {
+	dbFile := paths.CfgPath("network_usage.db")
+	if err := paths.EnsureConfigDir(); err != nil {
 		t.Fatalf("ensureConfigDir: %v", err)
 	}
 	f, err := os.Create(dbFile)
@@ -1754,52 +1080,7 @@ func TestReportConnectionBreakdown(t *testing.T) {
 	}
 }
 
-// ==================== ESTIMATE INTERVAL TESTS ====================
-
-func TestEstimateInterval(t *testing.T) {
-	db := setupTestDB(t)
-
-	// Reset cache before test
-	cachedInterval.set = false
-
-	// No data → fallback to 5
-	got := estimateInterval(db, time.Time{})
-	if got != 5 {
-		t.Errorf("empty DB: estimateInterval = %d, want 5", got)
-	}
-
-	// Insert samples 60s apart
-	base := time.Now().Add(-10 * time.Minute)
-	for i := 0; i < 5; i++ {
-		ts := base.Add(time.Duration(i) * 60 * time.Second).Format(time.RFC3339)
-		db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
-			VALUES (?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
-	}
-
-	// Reset cache to force re-computation with new data
-	cachedInterval.set = false
-
-	got = estimateInterval(db, time.Time{})
-	if got != 60 {
-		t.Errorf("60s intervals: estimateInterval = %d, want 60", got)
-	}
-}
-
-func TestEstimateIntervalSingleSample(t *testing.T) {
-	db := setupTestDB(t)
-
-	// Reset cache before test
-	cachedInterval.set = false
-
-	ts := time.Now().Format(time.RFC3339)
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
-		VALUES (?, ?, ?, ?, ?)`, ts, "AA-BB-CC-DD-EE-FF", "Dev", 100, 50)
-
-	got := estimateInterval(db, time.Time{})
-	if got != 5 {
-		t.Errorf("single sample: estimateInterval = %d, want 5 (fallback)", got)
-	}
-}
+// estimateInterval tests moved to internal/db/db_test.go
 
 // ==================== runReport END-TO-END TESTS ====================
 
@@ -2516,44 +1797,7 @@ func TestRunPurgeDays(t *testing.T) {
 	}
 }
 
-// ==================== countBeforeDate TESTS ====================
-
-func TestCountBeforeDate(t *testing.T) {
-	db := setupTestDB(t)
-
-	oldTS := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
-	newTS := time.Now().Format(time.RFC3339)
-
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
-		VALUES (?, ?, ?, ?, ?)`, oldTS, "AA-BB-CC-DD-EE-FF", "Old", 100, 50)
-	db.Exec(`INSERT INTO bandwidth_samples (timestamp, mac, name, download_kbps, upload_kbps)
-		VALUES (?, ?, ?, ?, ?)`, newTS, "AA-BB-CC-DD-EE-FF", "New", 200, 100)
-	db.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip) VALUES (?, ?)`, oldTS, "1.2.3.4")
-	db.Exec(`INSERT INTO mesh_snapshots (timestamp, name, role) VALUES (?, ?, ?)`, oldTS, "Main", "master")
-	db.Exec(`INSERT INTO wireless_snapshots (timestamp, band, ssid) VALUES (?, ?, ?)`, oldTS, "5GHz", "Net")
-
-	cutoff := time.Now().AddDate(0, 0, -7)
-	count, err := countBeforeDate(db, cutoff)
-	if err != nil {
-		t.Fatalf("countBeforeDate failed: %v", err)
-	}
-	if count != 4 {
-		t.Errorf("countBeforeDate = %d, want 4 (1 per table)", count)
-	}
-}
-
-func TestCountBeforeDateEmpty(t *testing.T) {
-	db := setupTestDB(t)
-
-	cutoff := time.Now().AddDate(0, 0, -7)
-	count, err := countBeforeDate(db, cutoff)
-	if err != nil {
-		t.Fatalf("countBeforeDate failed: %v", err)
-	}
-	if count != 0 {
-		t.Errorf("countBeforeDate on empty DB = %d, want 0", count)
-	}
-}
+// countBeforeDate tests moved to internal/db/db_test.go
 
 // ==================== checkDBCapacity TESTS ====================
 
@@ -2759,32 +2003,7 @@ func TestRunMonitorNoConfig(t *testing.T) {
 
 // ==================== logError TESTS ====================
 
-func TestLogError(t *testing.T) {
-	origLevel := logLevel.Load()
-	defer func() { logLevel.Store(origLevel) }()
-
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-	t.Cleanup(func() { os.Stderr = oldStderr })
-
-	logLevel.Store(int32(LevelError))
-	logError("test error message")
-
-	w.Close()
-	os.Stderr = oldStderr
-
-	var buf [4096]byte
-	n, _ := r.Read(buf[:])
-	output := string(buf[:n])
-
-	if !strings.Contains(output, "test error message") {
-		t.Error("logError should output the message")
-	}
-	if !strings.Contains(output, "ERR") {
-		t.Error("logError should contain ERR prefix")
-	}
-}
+// TestLogError moved to internal/decolog/decolog_test.go
 
 // ==================== filterClients with alias TESTS ====================
 

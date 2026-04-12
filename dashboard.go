@@ -7,6 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/jvreagan/deco/internal/decoclient"
 )
 
 // activityEntry is a timestamped log line in the dashboard.
@@ -346,15 +348,15 @@ func colorPct(pct float64, label string) string {
 }
 
 func runDashboard(interval int) error {
-	config, err := loadConfig()
+	config, err := decoclient.LoadConfig()
 	if err != nil {
 		return err
 	}
-	if err := validateConfig(config); err != nil {
+	if err := decoclient.ValidateConfig(config); err != nil {
 		return err
 	}
 
-	dc := NewDecoClient(config.Host, config.Password)
+	dc := decoclient.NewDecoClient(config.Host, config.Password)
 
 	m := dashboardModel{
 		host:       config.Host,
