@@ -1,6 +1,7 @@
 package decoclient
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -381,7 +382,7 @@ func TestGetClients(t *testing.T) {
 		t.Fatalf("Authorize failed: %v", err)
 	}
 
-	data, err := client.GetClients()
+	data, err := client.GetClients(context.Background())
 	if err != nil {
 		t.Fatalf("GetClients failed: %v", err)
 	}
@@ -429,7 +430,7 @@ func TestGetNetwork(t *testing.T) {
 		t.Fatalf("Authorize failed: %v", err)
 	}
 
-	data, err := client.GetNetwork()
+	data, err := client.GetNetwork(context.Background())
 	if err != nil {
 		t.Fatalf("GetNetwork failed: %v", err)
 	}
@@ -464,7 +465,7 @@ func TestGetWireless(t *testing.T) {
 		t.Fatalf("Authorize failed: %v", err)
 	}
 
-	data, err := client.GetWireless()
+	data, err := client.GetWireless(context.Background())
 	if err != nil {
 		t.Fatalf("GetWireless failed: %v", err)
 	}
@@ -493,7 +494,7 @@ func TestGetMesh(t *testing.T) {
 		t.Fatalf("Authorize failed: %v", err)
 	}
 
-	data, err := client.GetMesh()
+	data, err := client.GetMesh(context.Background())
 	if err != nil {
 		t.Fatalf("GetMesh failed: %v", err)
 	}
@@ -523,7 +524,7 @@ func TestReboot(t *testing.T) {
 		t.Fatalf("Authorize failed: %v", err)
 	}
 
-	if err := client.Reboot(); err != nil {
+	if err := client.Reboot(context.Background()); err != nil {
 		t.Errorf("Reboot failed: %v", err)
 	}
 }
@@ -535,13 +536,13 @@ func TestBlockUnblock(t *testing.T) {
 	}
 
 	t.Run("block", func(t *testing.T) {
-		if err := client.BlockClient("AA-BB-CC-DD-EE-FF"); err != nil {
+		if err := client.BlockClient(context.Background(), "AA-BB-CC-DD-EE-FF"); err != nil {
 			t.Errorf("BlockClient failed: %v", err)
 		}
 	})
 
 	t.Run("unblock", func(t *testing.T) {
-		if err := client.UnblockClient("AA-BB-CC-DD-EE-FF"); err != nil {
+		if err := client.UnblockClient(context.Background(), "AA-BB-CC-DD-EE-FF"); err != nil {
 			t.Errorf("UnblockClient failed: %v", err)
 		}
 	})
@@ -563,7 +564,7 @@ func TestLogout(t *testing.T) {
 func TestRequestNotLoggedIn(t *testing.T) {
 	client, _, _ := setupMockClient(t, "testpass")
 
-	_, err := client.Request("admin/client?form=client_list", map[string]interface{}{
+	_, err := client.Request(context.Background(), "admin/client?form=client_list", map[string]interface{}{
 		"operation": "read",
 	})
 	if err == nil {
@@ -577,7 +578,7 @@ func TestRequestNotLoggedIn(t *testing.T) {
 func TestEnsureAuthorized(t *testing.T) {
 	client, _, _ := setupMockClient(t, "testpass")
 
-	if err := client.EnsureAuthorized(); err != nil {
+	if err := client.EnsureAuthorized(context.Background()); err != nil {
 		t.Fatalf("first EnsureAuthorized failed: %v", err)
 	}
 	if !client.logged {
@@ -585,7 +586,7 @@ func TestEnsureAuthorized(t *testing.T) {
 	}
 
 	stok := client.stok
-	if err := client.EnsureAuthorized(); err != nil {
+	if err := client.EnsureAuthorized(context.Background()); err != nil {
 		t.Fatalf("second EnsureAuthorized failed: %v", err)
 	}
 	if client.stok != stok {
@@ -605,7 +606,7 @@ func TestInvalidateAndReauth(t *testing.T) {
 		t.Error("should not be logged in after Invalidate")
 	}
 
-	if err := client.EnsureAuthorized(); err != nil {
+	if err := client.EnsureAuthorized(context.Background()); err != nil {
 		t.Fatalf("EnsureAuthorized after Invalidate failed: %v", err)
 	}
 	if !client.logged {
@@ -643,7 +644,7 @@ func TestProactiveSessionRefresh(t *testing.T) {
 
 	client.lastAuthTime = time.Now().Add(-6 * time.Minute)
 
-	if err := client.EnsureAuthorized(); err != nil {
+	if err := client.EnsureAuthorized(context.Background()); err != nil {
 		t.Fatalf("EnsureAuthorized failed: %v", err)
 	}
 
@@ -704,7 +705,7 @@ func TestSessionExpiryRetry(t *testing.T) {
 		t.Fatalf("Authorize failed: %v", err)
 	}
 
-	data, err := client.GetClients()
+	data, err := client.GetClients(context.Background())
 	if err != nil {
 		t.Fatalf("GetClients should succeed after retry: %v", err)
 	}

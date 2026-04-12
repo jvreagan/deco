@@ -2,6 +2,7 @@ package decoclient
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
@@ -47,6 +48,8 @@ type DecoClient struct {
 	host         string
 	password     string
 	mu           sync.Mutex
+	authCond     *sync.Cond // signaled when auth completes; lazily initialized
+	authorizing  bool       // true while an auth handshake is in progress
 	client       *http.Client
 	stok         string
 	sysauth      string
@@ -138,25 +141,57 @@ func (dc *DecoClient) baseURL() string {
 }
 
 // EnsureAuthorized checks if the session is active and re-authorizes if needed.
-func (dc *DecoClient) EnsureAuthorized() error {
+// The mutex is released during the HTTP auth handshake so that concurrent callers
+// waiting for auth are not blocked for the full round-trip duration.
+func (dc *DecoClient) EnsureAuthorized(ctx context.Context) error {
 	dc.mu.Lock()
-	defer dc.mu.Unlock()
+	// Lazy-init the condition variable
+	if dc.authCond == nil {
+		dc.authCond = sync.NewCond(&dc.mu)
+	}
+
+	// If already logged in and session is fresh, return immediately.
 	if dc.logged && time.Since(dc.lastAuthTime) < SessionTimeout {
+		dc.mu.Unlock()
 		return nil
 	}
+
+	// If another goroutine is already authorizing, wait for it to finish.
+	for dc.authorizing {
+		dc.authCond.Wait()
+	}
+	// Re-check after waking up — the auth may have succeeded.
+	if dc.logged && time.Since(dc.lastAuthTime) < SessionTimeout {
+		dc.mu.Unlock()
+		return nil
+	}
+
+	// We are the goroutine that will perform auth.
 	if dc.logged {
 		decolog.Debug("session older than %s, re-authenticating", SessionTimeout)
 		dc.invalidate()
 	}
 	// Reset HTTP client to clear stale cookies
-	jar, _ := cookiejar.New(nil) // cookiejar.New never returns an error with nil options
+	jar, _ := cookiejar.New(nil)
 	dc.client.Jar = jar
 	var err error
 	dc.aesKey, dc.aesIV, err = generateAESKeyIV()
 	if err != nil {
+		dc.mu.Unlock()
 		return fmt.Errorf("failed to generate encryption keys: %v", err)
 	}
-	return dc.Authorize()
+	dc.authorizing = true
+	dc.mu.Unlock()
+
+	// Perform auth without holding the mutex — HTTP round-trips happen here.
+	authErr := dc.authorize(ctx)
+
+	dc.mu.Lock()
+	dc.authorizing = false
+	dc.authCond.Broadcast()
+	dc.mu.Unlock()
+
+	return authErr
 }
 
 // Invalidate marks the session as expired so EnsureAuthorized will re-auth.
@@ -173,10 +208,15 @@ func (dc *DecoClient) invalidate() {
 	dc.sysauth = ""
 }
 
-func (dc *DecoClient) getPasswordKeys() error {
+func (dc *DecoClient) getPasswordKeys(ctx context.Context) error {
 	apiURL := fmt.Sprintf("http://%s/cgi-bin/luci/;stok=/login?form=keys&operation=read", dc.host)
 
-	resp, err := dc.client.Post(apiURL, "application/json", nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := dc.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -208,10 +248,15 @@ func (dc *DecoClient) getPasswordKeys() error {
 	return nil
 }
 
-func (dc *DecoClient) getAuthKeys() error {
+func (dc *DecoClient) getAuthKeys(ctx context.Context) error {
 	apiURL := fmt.Sprintf("http://%s/cgi-bin/luci/;stok=/login?form=auth&operation=read", dc.host)
 
-	resp, err := dc.client.Post(apiURL, "application/json", nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := dc.client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -260,14 +305,20 @@ func (dc *DecoClient) getSignature(dataLen int, isLogin bool) (string, error) {
 	return rsaEncrypt(signData, dc.signN, dc.signE)
 }
 
-// Authorize performs the login handshake with the router.
+// Authorize performs the login handshake with the router using context.Background().
+// Prefer authorize(ctx) for cancellation support.
 func (dc *DecoClient) Authorize() error {
+	return dc.authorize(context.Background())
+}
+
+// authorize performs the login handshake with the router.
+func (dc *DecoClient) authorize(ctx context.Context) error {
 	// Get RSA keys
-	if err := dc.getPasswordKeys(); err != nil {
+	if err := dc.getPasswordKeys(ctx); err != nil {
 		return fmt.Errorf("failed to get password keys: %v", err)
 	}
 
-	if err := dc.getAuthKeys(); err != nil {
+	if err := dc.getAuthKeys(ctx); err != nil {
 		return fmt.Errorf("failed to get auth keys: %v", err)
 	}
 
@@ -306,7 +357,7 @@ func (dc *DecoClient) Authorize() error {
 	// Build body manually to match Python's order (sign before data)
 	bodyStr := fmt.Sprintf("sign=%s&data=%s", signature, url.QueryEscape(encryptedData))
 
-	req, err := http.NewRequest("POST", loginURL, strings.NewReader(bodyStr))
+	req, err := http.NewRequestWithContext(ctx, "POST", loginURL, strings.NewReader(bodyStr))
 	if err != nil {
 		return fmt.Errorf("failed to create login request: %v", err)
 	}
@@ -378,7 +429,7 @@ func (dc *DecoClient) Authorize() error {
 	return nil
 }
 
-func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
+func (dc *DecoClient) requestOnce(ctx context.Context, path string, reqData map[string]interface{}) (map[string]interface{}, error) {
 	// Rate limit outside the mutex to avoid blocking other callers during sleep.
 	dc.mu.Lock()
 	var sleepDur time.Duration
@@ -393,11 +444,11 @@ func (dc *DecoClient) requestOnce(path string, reqData map[string]interface{}) (
 	}
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
-	return dc.requestOnceUnlocked(path, reqData)
+	return dc.requestOnceUnlocked(ctx, path, reqData)
 }
 
 // requestOnceUnlocked is the lock-free implementation of requestOnce; callers must hold dc.mu.
-func (dc *DecoClient) requestOnceUnlocked(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
+func (dc *DecoClient) requestOnceUnlocked(ctx context.Context, path string, reqData map[string]interface{}) (map[string]interface{}, error) {
 	dc.lastRequest = time.Now()
 
 	start := time.Now()
@@ -426,7 +477,7 @@ func (dc *DecoClient) requestOnceUnlocked(path string, reqData map[string]interf
 	// Build body (sign before data)
 	bodyStr := fmt.Sprintf("sign=%s&data=%s", signature, url.QueryEscape(encryptedData))
 
-	req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, strings.NewReader(bodyStr))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
@@ -500,7 +551,7 @@ func (dc *DecoClient) requestOnceUnlocked(path string, reqData map[string]interf
 }
 
 // Request sends an encrypted API request to the router.
-func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[string]interface{}, error) {
+func (dc *DecoClient) Request(ctx context.Context, path string, reqData map[string]interface{}) (map[string]interface{}, error) {
 	dc.mu.Lock()
 	logged := dc.logged
 	dc.mu.Unlock()
@@ -508,7 +559,7 @@ func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[
 		return nil, fmt.Errorf("not logged in")
 	}
 
-	result, err := dc.requestOnce(path, reqData)
+	result, err := dc.requestOnce(ctx, path, reqData)
 	if err != nil {
 		// Check for session expired/forbidden errors — auto-retry once.
 		// Use the mutex to ensure only one goroutine re-authenticates.
@@ -521,16 +572,16 @@ func (dc *DecoClient) Request(path string, reqData map[string]interface{}) (map[
 			}
 			dc.mu.Unlock()
 			if needsReauth {
-				if authErr := dc.Authorize(); authErr != nil {
+				if authErr := dc.authorize(ctx); authErr != nil {
 					return nil, fmt.Errorf("re-auth failed: %v (original: %v)", authErr, err)
 				}
 			} else {
-				// Another goroutine already invalidated; wait briefly then let EnsureAuthorized handle it
-				if authErr := dc.EnsureAuthorized(); authErr != nil {
+				// Another goroutine already invalidated; let EnsureAuthorized handle it
+				if authErr := dc.EnsureAuthorized(ctx); authErr != nil {
 					return nil, fmt.Errorf("re-auth failed: %v (original: %v)", authErr, err)
 				}
 			}
-			return dc.requestOnce(path, reqData)
+			return dc.requestOnce(ctx, path, reqData)
 		}
 		return nil, err
 	}
@@ -542,7 +593,10 @@ func (dc *DecoClient) Logout() {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
 	if dc.logged {
-		if _, err := dc.requestOnceUnlocked("admin/system?form=logout", map[string]interface{}{"operation": "write"}); err != nil {
+		// Use a short timeout context for logout — don't block on unresponsive router.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := dc.requestOnceUnlocked(ctx, "admin/system?form=logout", map[string]interface{}{"operation": "write"}); err != nil {
 			decolog.Debug("logout request failed: %v", err)
 		}
 		dc.logged = false
@@ -552,8 +606,8 @@ func (dc *DecoClient) Logout() {
 // ==================== API METHODS ====================
 
 // GetClients returns the list of connected devices.
-func (dc *DecoClient) GetClients() (*ClientList, error) {
-	data, err := dc.Request("admin/client?form=client_list", map[string]interface{}{
+func (dc *DecoClient) GetClients(ctx context.Context) (*ClientList, error) {
+	data, err := dc.Request(ctx, "admin/client?form=client_list", map[string]interface{}{
 		"operation": "read",
 		// "default" is the Deco API convention meaning "all devices" (not a specific MAC).
 		"params": map[string]string{"device_mac": "default"},
@@ -627,13 +681,13 @@ func (dc *DecoClient) GetClients() (*ClientList, error) {
 }
 
 // GetNetwork returns the network configuration (WAN, LAN, performance).
-func (dc *DecoClient) GetNetwork() (*NetworkInfo, error) {
-	data, err := dc.Request("admin/network?form=wan_ipv4", map[string]interface{}{"operation": "read"})
+func (dc *DecoClient) GetNetwork(ctx context.Context) (*NetworkInfo, error) {
+	data, err := dc.Request(ctx, "admin/network?form=wan_ipv4", map[string]interface{}{"operation": "read"})
 	if err != nil {
 		return nil, err
 	}
 
-	perf, perfErr := dc.Request("admin/network?form=performance", map[string]interface{}{"operation": "read"})
+	perf, perfErr := dc.Request(ctx, "admin/network?form=performance", map[string]interface{}{"operation": "read"})
 	if perfErr != nil {
 		decolog.Debug("performance query failed: %v", perfErr)
 	}
@@ -673,8 +727,8 @@ func (dc *DecoClient) GetNetwork() (*NetworkInfo, error) {
 }
 
 // GetWireless returns the wireless configuration.
-func (dc *DecoClient) GetWireless() (*WirelessInfo, error) {
-	data, err := dc.Request("admin/wireless?form=wlan", map[string]interface{}{"operation": "read"})
+func (dc *DecoClient) GetWireless(ctx context.Context) (*WirelessInfo, error) {
+	data, err := dc.Request(ctx, "admin/wireless?form=wlan", map[string]interface{}{"operation": "read"})
 	if err != nil {
 		return nil, err
 	}
@@ -728,8 +782,8 @@ func (dc *DecoClient) GetWireless() (*WirelessInfo, error) {
 }
 
 // GetMesh returns the mesh topology.
-func (dc *DecoClient) GetMesh() (*MeshInfo, error) {
-	data, err := dc.Request("admin/device?form=device_list", map[string]interface{}{"operation": "read"})
+func (dc *DecoClient) GetMesh(ctx context.Context) (*MeshInfo, error) {
+	data, err := dc.Request(ctx, "admin/device?form=device_list", map[string]interface{}{"operation": "read"})
 	if err != nil {
 		return nil, err
 	}
@@ -773,16 +827,16 @@ func (dc *DecoClient) GetMesh() (*MeshInfo, error) {
 }
 
 // Reboot sends a reboot command to the router.
-func (dc *DecoClient) Reboot() error {
-	_, err := dc.Request("admin/device?form=reboot", map[string]interface{}{
+func (dc *DecoClient) Reboot(ctx context.Context) error {
+	_, err := dc.Request(ctx, "admin/device?form=reboot", map[string]interface{}{
 		"operation": "reboot",
 	})
 	return err
 }
 
 // BlockClient blocks a device by MAC address.
-func (dc *DecoClient) BlockClient(mac string) error {
-	_, err := dc.Request("admin/client?form=block", map[string]interface{}{
+func (dc *DecoClient) BlockClient(ctx context.Context, mac string) error {
+	_, err := dc.Request(ctx, "admin/client?form=block", map[string]interface{}{
 		"operation": "write",
 		"params": map[string]interface{}{
 			"mac":    mac,
@@ -793,8 +847,8 @@ func (dc *DecoClient) BlockClient(mac string) error {
 }
 
 // UnblockClient unblocks a device by MAC address.
-func (dc *DecoClient) UnblockClient(mac string) error {
-	_, err := dc.Request("admin/client?form=block", map[string]interface{}{
+func (dc *DecoClient) UnblockClient(ctx context.Context, mac string) error {
+	_, err := dc.Request(ctx, "admin/client?form=block", map[string]interface{}{
 		"operation": "write",
 		"params": map[string]interface{}{
 			"mac":    mac,

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -61,14 +62,15 @@ func tickCmd(d time.Duration) tea.Cmd {
 func fetchData(dc *DecoClient) tea.Cmd {
 	return func() tea.Msg {
 		// Ensure we have a valid session; re-authorize if needed.
-		if err := dc.EnsureAuthorized(); err != nil {
+		ctx := context.Background()
+		if err := dc.EnsureAuthorized(ctx); err != nil {
 			return dataMsg{err: err}
 		}
 
-		clients, cErr := dc.GetClients()
-		network, nErr := dc.GetNetwork()
-		mesh, mErr := dc.GetMesh()
-		wireless, wErr := dc.GetWireless()
+		clients, cErr := dc.GetClients(ctx)
+		network, nErr := dc.GetNetwork(ctx)
+		mesh, mErr := dc.GetMesh(ctx)
+		wireless, wErr := dc.GetWireless(ctx)
 
 		// If all failed, the session likely expired — invalidate so next tick re-auths.
 		if cErr != nil && nErr != nil && mErr != nil && wErr != nil {

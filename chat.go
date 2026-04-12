@@ -200,10 +200,11 @@ func gatherNetworkContext(compact bool, db *sql.DB) (string, networkSnapshot) {
 			wg       sync.WaitGroup
 		)
 		wg.Add(4)
-		go func() { defer wg.Done(); clients, cliErr = client.GetClients() }()
-		go func() { defer wg.Done(); network, netErr = client.GetNetwork() }()
-		go func() { defer wg.Done(); mesh, meshErr = client.GetMesh() }()
-		go func() { defer wg.Done(); wifi, wifiErr = client.GetWireless() }()
+		ctx := context.Background()
+		go func() { defer wg.Done(); clients, cliErr = client.GetClients(ctx) }()
+		go func() { defer wg.Done(); network, netErr = client.GetNetwork(ctx) }()
+		go func() { defer wg.Done(); mesh, meshErr = client.GetMesh(ctx) }()
+		go func() { defer wg.Done(); wifi, wifiErr = client.GetWireless(ctx) }()
 		wg.Wait()
 		for _, e := range []error{cliErr, netErr, meshErr, wifiErr} {
 			if e != nil {

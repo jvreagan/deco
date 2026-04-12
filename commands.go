@@ -129,7 +129,7 @@ func runClients(jsonOut bool, nameFilter, macFilter string) error {
 	}
 	defer client.Logout()
 
-	data, err := client.GetClients()
+	data, err := client.GetClients(context.Background())
 	if err != nil {
 		return err
 	}
@@ -216,6 +216,7 @@ func pollLoop(cfg *pollLoopConfig) error {
 		ctx, cancel = signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	}
 	defer cancel()
+	cfg.ctx = ctx // make resolved context available to work closures
 
 	cfg.Client = decoclient.NewDecoClient(config.Host, config.Password)
 	defer cfg.Client.Logout()
@@ -256,7 +257,7 @@ func pollLoop(cfg *pollLoopConfig) error {
 
 		start := time.Now()
 
-		if err := cfg.Client.EnsureAuthorized(); err != nil {
+		if err := cfg.Client.EnsureAuthorized(ctx); err != nil {
 			consecutiveFailures++
 			totalFailures++
 			if consecutiveFailures >= maxFail {
@@ -317,7 +318,7 @@ func runWatch(interval int, nameFilter, macFilter string, maxFailures int) error
 		maxFailures: maxFailures,
 	}
 	cfg.work = func(cycle int) error {
-		data, err := cfg.Client.GetClients()
+		data, err := cfg.Client.GetClients(cfg.ctx)
 		if err != nil {
 			return err
 		}
@@ -339,7 +340,7 @@ func runNetwork(jsonOut bool) error {
 	}
 	defer client.Logout()
 
-	data, err := client.GetNetwork()
+	data, err := client.GetNetwork(context.Background())
 	if err != nil {
 		return err
 	}
@@ -359,7 +360,7 @@ func runWireless(jsonOut bool) error {
 	}
 	defer client.Logout()
 
-	data, err := client.GetWireless()
+	data, err := client.GetWireless(context.Background())
 	if err != nil {
 		return err
 	}
@@ -379,7 +380,7 @@ func runMesh(jsonOut bool) error {
 	}
 	defer client.Logout()
 
-	data, err := client.GetMesh()
+	data, err := client.GetMesh(context.Background())
 	if err != nil {
 		return err
 	}
@@ -408,10 +409,11 @@ func runAll() error {
 		wg sync.WaitGroup
 	)
 	wg.Add(4)
-	go func() { defer wg.Done(); network, netErr = client.GetNetwork() }()
-	go func() { defer wg.Done(); wireless, wlErr = client.GetWireless() }()
-	go func() { defer wg.Done(); mesh, meshErr = client.GetMesh() }()
-	go func() { defer wg.Done(); clients, cliErr = client.GetClients() }()
+	ctx := context.Background()
+	go func() { defer wg.Done(); network, netErr = client.GetNetwork(ctx) }()
+	go func() { defer wg.Done(); wireless, wlErr = client.GetWireless(ctx) }()
+	go func() { defer wg.Done(); mesh, meshErr = client.GetMesh(ctx) }()
+	go func() { defer wg.Done(); clients, cliErr = client.GetClients(ctx) }()
 	wg.Wait()
 
 	if netErr != nil {
@@ -458,7 +460,7 @@ func runAPI(endpoint, body string) error {
 		return fmt.Errorf("invalid JSON body: %v", err)
 	}
 
-	resp, err := client.Request(endpoint, reqData)
+	resp, err := client.Request(context.Background(), endpoint, reqData)
 	if err != nil {
 		return fmt.Errorf("API error: %v", err)
 	}
@@ -481,7 +483,7 @@ func runPoll(interval int, maxFailures int) error {
 		},
 	}
 	cfg.work = func(cycle int) error {
-		data, err := cfg.Client.GetClients()
+		data, err := cfg.Client.GetClients(cfg.ctx)
 		if err != nil {
 			return err
 		}
@@ -564,10 +566,10 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 			wg sync.WaitGroup
 		)
 		wg.Add(4)
-		go func() { defer wg.Done(); clientData, clientErr = client.GetClients() }()
-		go func() { defer wg.Done(); networkData, networkErr = client.GetNetwork() }()
-		go func() { defer wg.Done(); wirelessData, wirelessErr = client.GetWireless() }()
-		go func() { defer wg.Done(); meshData, meshErr = client.GetMesh() }()
+		go func() { defer wg.Done(); clientData, clientErr = client.GetClients(cfg.ctx) }()
+		go func() { defer wg.Done(); networkData, networkErr = client.GetNetwork(cfg.ctx) }()
+		go func() { defer wg.Done(); wirelessData, wirelessErr = client.GetWireless(cfg.ctx) }()
+		go func() { defer wg.Done(); meshData, meshErr = client.GetMesh(cfg.ctx) }()
 		wg.Wait()
 
 		// If all requests failed, session is probably dead
@@ -1384,7 +1386,7 @@ func runReboot(force bool) error {
 	}
 	defer client.Logout()
 
-	if err := client.Reboot(); err != nil {
+	if err := client.Reboot(context.Background()); err != nil {
 		return fmt.Errorf("rebooting: %v", err)
 	}
 
@@ -1416,12 +1418,12 @@ func runBlockAction(mac string, block bool) error {
 	defer client.Logout()
 
 	if block {
-		if err := client.BlockClient(mac); err != nil {
+		if err := client.BlockClient(context.Background(), mac); err != nil {
 			return fmt.Errorf("blocking device: %v", err)
 		}
 		fmt.Printf("Blocked device %s\n", mac)
 	} else {
-		if err := client.UnblockClient(mac); err != nil {
+		if err := client.UnblockClient(context.Background(), mac); err != nil {
 			return fmt.Errorf("unblocking device: %v", err)
 		}
 		fmt.Printf("Unblocked device %s\n", mac)
