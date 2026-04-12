@@ -766,9 +766,11 @@ func TestSaveConversation(t *testing.T) {
 }
 
 func TestSaveConversationDefaultFilename(t *testing.T) {
-	// Redirect HOME to a temp dir so the test doesn't write to the real home
+	// Redirect HOME to a temp dir so the test doesn't write to the real home.
+	// On Windows, os.UserHomeDir() checks USERPROFILE first.
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	messages := []ollamaMessage{
 		{Role: "user", Content: "test"},
