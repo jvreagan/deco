@@ -171,6 +171,11 @@ func InitDB() (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("failed to enable WAL mode: %v", err)
 	}
+	// Allow concurrent writers to retry for up to 5 seconds instead of failing immediately.
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy timeout: %v", err)
+	}
 
 	if err := RunMigrations(db); err != nil {
 		db.Close()

@@ -22,7 +22,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/jvreagan/deco/internal/db"
+	dbpkg "github.com/jvreagan/deco/internal/db"
 	"github.com/jvreagan/deco/internal/decoclient"
 	"github.com/jvreagan/deco/internal/decolog"
 	"github.com/jvreagan/deco/internal/paths"
@@ -480,7 +480,7 @@ func runPoll(interval int, maxFailures int) error {
 		maxFailures: maxFailures,
 		setup: func(db *sql.DB, size int64) {
 			fmt.Printf("Starting bandwidth monitor (polling every %ds)\n", interval)
-			fmt.Printf("Database: %s\n", dbPath)
+			fmt.Printf("Database: %s\n", dbpkg.DBPath())
 			fmt.Printf("DB Size:  %s / %s limit\n", formatSize(size), formatSize(DBSizeLimitBytes))
 			fmt.Println("Press Ctrl+C to stop")
 		},
@@ -513,16 +513,16 @@ func runPoll(interval int, maxFailures int) error {
 // Thin wrappers delegating to internal/db.
 
 func storeBandwidthSamples(database *sql.DB, clients *ClientList, ts string) {
-	db.StoreBandwidthSamples(database, clients, ts)
+	dbpkg.StoreBandwidthSamples(database, clients, ts)
 }
 func storeNetworkSnapshot(database *sql.DB, network *NetworkInfo, ts string) {
-	db.StoreNetworkSnapshot(database, network, ts)
+	dbpkg.StoreNetworkSnapshot(database, network, ts)
 }
 func storeMeshSnapshot(database *sql.DB, mesh *MeshInfo, ts string) {
-	db.StoreMeshSnapshot(database, mesh, ts)
+	dbpkg.StoreMeshSnapshot(database, mesh, ts)
 }
 func storeWirelessSnapshot(database *sql.DB, wireless *WirelessInfo, ts string) {
-	db.StoreWirelessSnapshot(database, wireless, ts)
+	dbpkg.StoreWirelessSnapshot(database, wireless, ts)
 }
 
 // runMonitor starts a full network monitor that polls all data endpoints and stores
@@ -540,7 +540,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 		maxFailures: maxFailures,
 		setup: func(db *sql.DB, size int64) {
 			fmt.Printf("Starting full network monitor (polling every %ds)\n", interval)
-			fmt.Printf("Database: %s\n", dbPath)
+			fmt.Printf("Database: %s\n", dbpkg.DBPath())
 			fmt.Printf("DB Size:  %s / %s limit\n", formatSize(size), formatSize(DBSizeLimitBytes))
 			if notify {
 				knownMACs = loadKnownMACs(db)
@@ -656,7 +656,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 	return pollLoop(cfg)
 }
 
-func loadKnownMACs(database *sql.DB) map[string]bool { return db.LoadKnownMACs(database) }
+func loadKnownMACs(database *sql.DB) map[string]bool { return dbpkg.LoadKnownMACs(database) }
 
 var blockPrivateWebhooks = true // set to false in tests
 
@@ -795,12 +795,25 @@ func resolveDeviceMAC(db *sql.DB, identifier string) (string, error) {
 		return strings.ToUpper(identifier), nil
 	}
 
-	// Check aliases (substring match)
+	// Check aliases (substring match) — collect all matches to detect ambiguity.
 	aliases := loadAliases()
+	lower := strings.ToLower(identifier)
+	var aliasMatches []struct{ mac, alias string }
 	for mac, alias := range aliases {
-		if strings.Contains(strings.ToLower(alias), strings.ToLower(identifier)) {
-			return mac, nil
+		if strings.Contains(strings.ToLower(alias), lower) {
+			aliasMatches = append(aliasMatches, struct{ mac, alias string }{mac, alias})
 		}
+	}
+	if len(aliasMatches) == 1 {
+		return aliasMatches[0].mac, nil
+	}
+	if len(aliasMatches) > 1 {
+		var names []string
+		for _, m := range aliasMatches {
+			names = append(names, fmt.Sprintf("  %s (%s)", m.alias, m.mac))
+		}
+		sort.Strings(names)
+		return "", fmt.Errorf("ambiguous match for %q — multiple devices match:\n%s\nUse a MAC address or more specific name", identifier, strings.Join(names, "\n"))
 	}
 
 	// Search bandwidth_samples name field (LIKE)
@@ -965,9 +978,9 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	return nil
 }
 
-func parsePeriod(period string) (time.Time, string, error) { return db.ParsePeriod(period) }
-func estimateInterval(database db.Querier, since time.Time) int {
-	return db.EstimateInterval(database, since)
+func parsePeriod(period string) (time.Time, string, error) { return dbpkg.ParsePeriod(period) }
+func estimateInterval(database dbpkg.Querier, since time.Time) int {
+	return dbpkg.EstimateInterval(database, since)
 }
 
 func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group string) error {
@@ -988,6 +1001,8 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 	}
 	defer tx.Rollback()
 
+	startStr := startTime.Format(time.RFC3339)
+
 	query := `
 		SELECT
 			mac, name, ip, connection, device_type,
@@ -1002,7 +1017,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 		ORDER BY (total_download + total_upload) DESC
 	`
 
-	rows, err := tx.Query(query, startTime.Format(time.RFC3339))
+	rows, err := tx.Query(query, startStr)
 	if err != nil {
 		return fmt.Errorf("query error: %v", err)
 	}
@@ -1045,7 +1060,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 	// queries scan the same index (idx_timestamp) over the same time range.
 	connRows, connErr := tx.Query(`SELECT mac, connection, COUNT(*) as samples
 		FROM bandwidth_samples WHERE timestamp >= ? GROUP BY mac, connection`,
-		startTime.Format(time.RFC3339))
+		startStr)
 	if connErr == nil {
 		breakdown := map[string]map[string]int64{}
 		for connRows.Next() {
@@ -1109,7 +1124,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 
 	var totalSamples int64
 	if err := tx.QueryRow("SELECT COUNT(DISTINCT timestamp) FROM bandwidth_samples WHERE timestamp >= ?",
-		startTime.Format(time.RFC3339)).Scan(&totalSamples); err != nil {
+		startStr).Scan(&totalSamples); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to count samples: %v\n", err)
 	}
 
@@ -1117,7 +1132,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 
 	report := &Report{
 		Period:          periodName,
-		StartTime:       startTime.Format(time.RFC3339),
+		StartTime:       startStr,
 		QueryTime:       time.Now().Format(time.RFC3339),
 		IntervalSeconds: intervalSec,
 		TotalSamples:    totalSamples,
@@ -1165,6 +1180,7 @@ func runReportNetwork(period string, jsonOut bool) error {
 	defer rows.Close()
 
 	var entries []NetworkReportEntry
+
 	for rows.Next() {
 		var e NetworkReportEntry
 		if err := rows.Scan(&e.Timestamp, &e.WANIP, &e.Gateway, &e.DNS1, &e.DNS2, &e.CPU, &e.Memory); err != nil {
@@ -1239,7 +1255,7 @@ type statusInfo struct {
 }
 
 func runStatus(jsonOut bool) error {
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	if _, err := os.Stat(dbpkg.DBPath()); os.IsNotExist(err) {
 		fmt.Println("No database found. Run 'poll' first to collect data.")
 		return nil
 	}
@@ -1267,7 +1283,7 @@ func runStatus(jsonOut bool) error {
 
 	if jsonOut {
 		printJSON(statusInfo{
-			Database:      dbPath,
+			Database:      dbpkg.DBPath(),
 			SizeBytes:     size,
 			SizeMB:        fmt.Sprintf("%.2f", float64(size)/(1024*1024)),
 			LimitGB:       fmt.Sprintf("%.0f", float64(DBSizeLimitBytes)/(1024*1024*1024)),
@@ -1279,7 +1295,7 @@ func runStatus(jsonOut bool) error {
 		return nil
 	}
 
-	fmt.Printf("\nDatabase: %s\n", dbPath)
+	fmt.Printf("\nDatabase: %s\n", dbpkg.DBPath())
 	fmt.Printf("Size: %.2f MB / %.0f GB limit\n", float64(size)/(1024*1024), float64(DBSizeLimitBytes)/(1024*1024*1024))
 	fmt.Printf("Total samples: %d\n", totalSamples)
 	fmt.Printf("Unique devices: %d\n", uniqueDevices)
@@ -1289,7 +1305,7 @@ func runStatus(jsonOut bool) error {
 }
 
 func runPurge(force bool, beforeStr string, days int) error {
-	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+	if _, err := os.Stat(dbpkg.DBPath()); os.IsNotExist(err) {
 		fmt.Println("No database found. Nothing to purge.")
 		return nil
 	}
@@ -1318,7 +1334,7 @@ func runPurge(force bool, beforeStr string, days int) error {
 
 		if !force {
 			fmt.Printf("\nWill delete %d records older than %s\n", count, cutoff.Format("2006-01-02"))
-			fmt.Printf("Database: %s\n", dbPath)
+			fmt.Printf("Database: %s\n", dbpkg.DBPath())
 			fmt.Print("Type 'yes' to confirm: ")
 
 			var confirm string
@@ -1347,7 +1363,7 @@ func runPurge(force bool, beforeStr string, days int) error {
 
 	if !force {
 		fmt.Printf("\nWARNING: This will delete ALL %d bandwidth records and all related snapshots!\n", totalSamples)
-		fmt.Printf("Database: %s\n", dbPath)
+		fmt.Printf("Database: %s\n", dbpkg.DBPath())
 		fmt.Print("Type 'yes' to confirm: ")
 
 		var confirm string
@@ -1373,13 +1389,13 @@ func runPurge(force bool, beforeStr string, days int) error {
 	return nil
 }
 
-var allTables = db.AllTables
+var allTables = dbpkg.AllTables
 
 func countBeforeDate(database *sql.DB, cutoff time.Time) (int64, error) {
-	return db.CountBeforeDate(database, cutoff)
+	return dbpkg.CountBeforeDate(database, cutoff)
 }
 func purgeByDate(database *sql.DB, cutoff time.Time) (int64, error) {
-	return db.PurgeByDate(database, cutoff)
+	return dbpkg.PurgeByDate(database, cutoff)
 }
 
 func runReboot(force bool) error {

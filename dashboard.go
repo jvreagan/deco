@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -67,10 +68,21 @@ func fetchData(dc *DecoClient) tea.Cmd {
 			return dataMsg{err: err}
 		}
 
-		clients, cErr := dc.GetClients(ctx)
-		network, nErr := dc.GetNetwork(ctx)
-		mesh, mErr := dc.GetMesh(ctx)
-		wireless, wErr := dc.GetWireless(ctx)
+		// Fetch all endpoints in parallel for lower dashboard latency.
+		var (
+			clients  *ClientList
+			network  *NetworkInfo
+			mesh     *MeshInfo
+			wireless *WirelessInfo
+			cErr, nErr, mErr, wErr error
+			wg       sync.WaitGroup
+		)
+		wg.Add(4)
+		go func() { defer wg.Done(); clients, cErr = dc.GetClients(ctx) }()
+		go func() { defer wg.Done(); network, nErr = dc.GetNetwork(ctx) }()
+		go func() { defer wg.Done(); mesh, mErr = dc.GetMesh(ctx) }()
+		go func() { defer wg.Done(); wireless, wErr = dc.GetWireless(ctx) }()
+		wg.Wait()
 
 		// If all failed, the session likely expired — invalidate so next tick re-auths.
 		if cErr != nil && nErr != nil && mErr != nil && wErr != nil {

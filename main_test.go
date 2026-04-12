@@ -17,6 +17,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	dbpkg "github.com/jvreagan/deco/internal/db"
 	"github.com/jvreagan/deco/internal/decoclient"
 	"github.com/jvreagan/deco/internal/paths"
 )
@@ -189,9 +190,8 @@ func TestCobraRootHelp(t *testing.T) {
 	w.Close()
 	os.Stdout = old
 
-	var buf [8192]byte
-	n, _ := r.Read(buf[:])
-	output := string(buf[:n])
+	outputBytes, _ := io.ReadAll(r)
+	output := string(outputBytes)
 
 	subcommands := []string{"clients", "network", "wireless", "mesh", "all", "poll", "monitor", "report", "status", "purge", "setup", "api", "version", "reboot", "block", "unblock", "alias"}
 	for _, cmd := range subcommands {
@@ -233,9 +233,9 @@ func TestBackoff(t *testing.T) {
 // ==================== TEST HELPERS ====================
 
 // testEnv sets up an isolated config environment for a test.
-// It points XDG_CONFIG_HOME at a temp dir and re-derives dbPath.
+// It points XDG_CONFIG_HOME at a temp dir and re-derives the DB path.
 //
-// Safety (#85): t.Cleanup restores the original dbPath after the test
+// Safety (#85): t.Cleanup restores the original DB path after the test
 // completes, so sequential tests do not leak state. However, because
 // setDBPath mutates a package-level variable, tests that call testEnv or
 // setupTestDB must NOT use t.Parallel() — two concurrent tests would race
@@ -243,7 +243,7 @@ func TestBackoff(t *testing.T) {
 // would eliminate this restriction but is a large cross-cutting change.
 func testEnv(t *testing.T) string {
 	t.Helper()
-	origDBPath := dbPath
+	origDBPath := dbpkg.DBPath()
 	t.Cleanup(func() { setDBPath(origDBPath) })
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
@@ -773,9 +773,8 @@ func TestRunReportMeshQuery(t *testing.T) {
 	w.Close()
 	os.Stdout = old
 
-	var buf [8192]byte
-	n, _ := r.Read(buf[:])
-	output := string(buf[:n])
+	outputBytes, _ := io.ReadAll(r)
+	output := string(outputBytes)
 
 	if !strings.Contains(output, "MESH REPORT") {
 		t.Error("output should contain MESH REPORT header")
@@ -826,9 +825,8 @@ func TestReportSubcommands(t *testing.T) {
 	w.Close()
 	os.Stdout = old
 
-	var buf [8192]byte
-	n, _ := r.Read(buf[:])
-	output := string(buf[:n])
+	outputBytes, _ := io.ReadAll(r)
+	output := string(outputBytes)
 
 	if !strings.Contains(output, "network") {
 		t.Error("report --help should list 'network' subcommand")
@@ -850,9 +848,8 @@ func TestMonitorNotifyFlag(t *testing.T) {
 	w.Close()
 	os.Stdout = old
 
-	var buf [8192]byte
-	n, _ := r.Read(buf[:])
-	output := string(buf[:n])
+	outputBytes, _ := io.ReadAll(r)
+	output := string(outputBytes)
 
 	if !strings.Contains(output, "--notify") {
 		t.Error("monitor --help should show --notify flag")

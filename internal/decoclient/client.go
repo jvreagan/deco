@@ -39,6 +39,11 @@ type Config struct {
 // The Deco router firmware typically expires sessions after 5 minutes.
 const SessionTimeout = 5 * time.Minute
 
+// sessionRefreshThreshold is the proactive re-auth threshold. Refreshing
+// slightly before the actual timeout avoids wasting a round-trip on an
+// expired session that would trigger a retry anyway.
+const sessionRefreshThreshold = 4 * time.Minute
+
 // MinRequestInterval is the minimum time between consecutive API requests
 // to avoid hammering the router. See issue #39.
 const MinRequestInterval = 100 * time.Millisecond
@@ -136,10 +141,6 @@ func NewDecoClient(host, password string) *DecoClient {
 	return dc
 }
 
-func (dc *DecoClient) baseURL() string {
-	return fmt.Sprintf("http://%s/cgi-bin/luci/;stok=%s", dc.host, dc.stok)
-}
-
 // EnsureAuthorized checks if the session is active and re-authorizes if needed.
 // The mutex is released during the HTTP auth handshake so that concurrent callers
 // waiting for auth are not blocked for the full round-trip duration.
@@ -151,7 +152,7 @@ func (dc *DecoClient) EnsureAuthorized(ctx context.Context) error {
 	}
 
 	// If already logged in and session is fresh, return immediately.
-	if dc.logged && time.Since(dc.lastAuthTime) < SessionTimeout {
+	if dc.logged && time.Since(dc.lastAuthTime) < sessionRefreshThreshold {
 		dc.mu.Unlock()
 		return nil
 	}
@@ -161,7 +162,7 @@ func (dc *DecoClient) EnsureAuthorized(ctx context.Context) error {
 		dc.authCond.Wait()
 	}
 	// Re-check after waking up — the auth may have succeeded.
-	if dc.logged && time.Since(dc.lastAuthTime) < SessionTimeout {
+	if dc.logged && time.Since(dc.lastAuthTime) < sessionRefreshThreshold {
 		dc.mu.Unlock()
 		return nil
 	}
@@ -305,10 +306,11 @@ func (dc *DecoClient) getSignature(dataLen int, isLogin bool) (string, error) {
 	return rsaEncrypt(signData, dc.signN, dc.signE)
 }
 
-// Authorize performs the login handshake with the router using context.Background().
-// Prefer authorize(ctx) for cancellation support.
+// Authorize performs the login handshake with the router.
+// It routes through EnsureAuthorized to use the authorizing guard,
+// preventing concurrent auth races on shared RSA state.
 func (dc *DecoClient) Authorize() error {
-	return dc.authorize(context.Background())
+	return dc.EnsureAuthorized(context.Background())
 }
 
 // authorize performs the login handshake with the router.
@@ -429,8 +431,23 @@ func (dc *DecoClient) authorize(ctx context.Context) error {
 	return nil
 }
 
+// requestSnapshot holds a copy of shared state needed to build a request.
+// Snapshot under the lock, then release before doing crypto and HTTP I/O.
+type requestSnapshot struct {
+	aesKey  []byte
+	aesIV   []byte
+	stok    string
+	sysauth string
+	host    string
+	// Signature fields
+	password string
+	signN    *big.Int
+	signE    int
+	seq      int
+}
+
 func (dc *DecoClient) requestOnce(ctx context.Context, path string, reqData map[string]interface{}) (map[string]interface{}, error) {
-	// Rate limit outside the mutex to avoid blocking other callers during sleep.
+	// Rate limit: snapshot timing under the lock, sleep outside.
 	dc.mu.Lock()
 	var sleepDur time.Duration
 	if !dc.lastRequest.IsZero() {
@@ -442,15 +459,30 @@ func (dc *DecoClient) requestOnce(ctx context.Context, path string, reqData map[
 	if sleepDur > 0 {
 		time.Sleep(sleepDur)
 	}
+
+	// Snapshot shared state under the lock, then release immediately.
 	dc.mu.Lock()
-	defer dc.mu.Unlock()
-	return dc.requestOnceUnlocked(ctx, path, reqData)
+	dc.lastRequest = time.Now()
+	snap := requestSnapshot{
+		aesKey:   dc.aesKey,
+		aesIV:    dc.aesIV,
+		stok:     dc.stok,
+		sysauth:  dc.sysauth,
+		host:     dc.host,
+		password: dc.password,
+		signN:    dc.signN,
+		signE:    dc.signE,
+		seq:      dc.seq,
+	}
+	dc.mu.Unlock()
+
+	// All crypto, HTTP I/O, and response parsing happen without holding the mutex.
+	return dc.doRequest(ctx, path, reqData, snap)
 }
 
-// requestOnceUnlocked is the lock-free implementation of requestOnce; callers must hold dc.mu.
-func (dc *DecoClient) requestOnceUnlocked(ctx context.Context, path string, reqData map[string]interface{}) (map[string]interface{}, error) {
-	dc.lastRequest = time.Now()
-
+// doRequest performs the actual encrypted API request using a snapshot of shared state.
+// No mutex is held during this method — crypto, HTTP, and parsing run concurrently.
+func (dc *DecoClient) doRequest(ctx context.Context, path string, reqData map[string]interface{}, snap requestSnapshot) (map[string]interface{}, error) {
 	start := time.Now()
 	decolog.Debug("POST %s", path)
 
@@ -460,21 +492,19 @@ func (dc *DecoClient) requestOnceUnlocked(ctx context.Context, path string, reqD
 	}
 
 	// Encrypt request
-	encryptedData, err := aesEncrypt(jsonData, dc.aesKey, dc.aesIV)
+	encryptedData, err := aesEncrypt(jsonData, snap.aesKey, snap.aesIV)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt request: %v", err)
 	}
 
-	// Get signature
-	signature, err := dc.getSignature(len(encryptedData), false)
+	// Get signature (RSA computation — can be expensive)
+	signature, err := getSignatureFromSnapshot(snap, len(encryptedData), false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get request signature: %v", err)
 	}
 
 	// Build request
-	reqURL := fmt.Sprintf("%s/%s", dc.baseURL(), path)
-
-	// Build body (sign before data)
+	reqURL := fmt.Sprintf("http://%s/cgi-bin/luci/;stok=%s/%s", snap.host, snap.stok, path)
 	bodyStr := fmt.Sprintf("sign=%s&data=%s", signature, url.QueryEscape(encryptedData))
 
 	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, strings.NewReader(bodyStr))
@@ -482,10 +512,10 @@ func (dc *DecoClient) requestOnceUnlocked(ctx context.Context, path string, reqD
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Referer", fmt.Sprintf("http://%s/webpages/index.html", dc.host))
+	req.Header.Set("Referer", fmt.Sprintf("http://%s/webpages/index.html", snap.host))
 
-	if dc.sysauth != "" {
-		req.AddCookie(&http.Cookie{Name: "sysauth", Value: dc.sysauth})
+	if snap.sysauth != "" {
+		req.AddCookie(&http.Cookie{Name: "sysauth", Value: snap.sysauth})
 	}
 
 	resp, err := dc.client.Do(req)
@@ -521,7 +551,7 @@ func (dc *DecoClient) requestOnceUnlocked(ctx context.Context, path string, reqD
 	}
 
 	// Decrypt response
-	decrypted, err := aesDecrypt(responseData, dc.aesKey, dc.aesIV)
+	decrypted, err := aesDecrypt(responseData, snap.aesKey, snap.aesIV)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt response: %v", err)
 	}
@@ -548,6 +578,22 @@ func (dc *DecoClient) requestOnceUnlocked(ctx context.Context, path string, reqD
 	}
 
 	return decryptedResp, nil
+}
+
+// getSignatureFromSnapshot computes the RSA signature using snapshot state.
+func getSignatureFromSnapshot(snap requestSnapshot, dataLen int, isLogin bool) (string, error) {
+	hash := md5.Sum([]byte("admin" + snap.password))
+	hashStr := hex.EncodeToString(hash[:])
+
+	var signData string
+	if isLogin {
+		signData = fmt.Sprintf("k=%s&i=%s&h=%s&s=%d",
+			string(snap.aesKey), string(snap.aesIV), hashStr, snap.seq+dataLen)
+	} else {
+		signData = fmt.Sprintf("h=%s&s=%d", hashStr, snap.seq+dataLen)
+	}
+
+	return rsaEncrypt(signData, snap.signN, snap.signE)
 }
 
 // Request sends an encrypted API request to the router.

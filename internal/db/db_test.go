@@ -416,8 +416,10 @@ func TestParsePeriod(t *testing.T) {
 				}
 			}
 			if tt.input == "all" {
-				if !startTime.IsZero() {
-					t.Errorf("ParsePeriod(%q) startTime should be zero, got %v", tt.input, startTime)
+				// "all" returns Unix epoch (not zero-value) so SQL comparisons work correctly.
+				want := time.Unix(0, 0).UTC()
+				if !startTime.Equal(want) {
+					t.Errorf("ParsePeriod(%q) startTime = %v, want Unix epoch", tt.input, startTime)
 				}
 			}
 		})

@@ -330,7 +330,7 @@ func gatherNetworkContext(ctx context.Context, compact bool, db *sql.DB) (string
 
 // appendBandwidthHistory adds the "TOP BANDWIDTH TODAY" section to the context.
 func appendBandwidthHistory(sb *strings.Builder, db *sql.DB, aliases map[string]string, limit int, startOfDay time.Time, todayStr string) {
-	rows, err := db.Query(fmt.Sprintf(`
+	rows, err := db.Query(`
 		SELECT mac, name,
 			SUM(download_kbps) as total_download,
 			SUM(upload_kbps) as total_upload
@@ -338,8 +338,8 @@ func appendBandwidthHistory(sb *strings.Builder, db *sql.DB, aliases map[string]
 		WHERE timestamp >= ?
 		GROUP BY mac
 		ORDER BY (total_download + total_upload) DESC
-		LIMIT %d
-	`, limit), todayStr)
+		LIMIT ?
+	`, todayStr, limit)
 	if err != nil {
 		return
 	}
@@ -391,13 +391,13 @@ func appendBandwidthHistory(sb *strings.Builder, db *sql.DB, aliases map[string]
 
 // appendNetworkHistory adds the "WAN IP HISTORY" and performance summary sections.
 func appendNetworkHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr string) {
-	rows, err := db.Query(fmt.Sprintf(`
+	rows, err := db.Query(`
 		SELECT timestamp, wan_ip,
 			COALESCE(cpu_percent, 0), COALESCE(mem_percent, 0)
 		FROM network_snapshots
 		WHERE timestamp >= ?
 		ORDER BY timestamp
-		LIMIT %d`, limit), todayStr)
+		LIMIT ?`, todayStr, limit)
 	if err != nil {
 		return
 	}
@@ -455,12 +455,12 @@ func appendNetworkHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr s
 
 // appendMeshHistory adds the "MESH NODE UPTIME" section.
 func appendMeshHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr string) {
-	rows, err := db.Query(fmt.Sprintf(`
+	rows, err := db.Query(`
 		SELECT name, role, mac, status, firmware
 		FROM mesh_snapshots
 		WHERE timestamp >= ?
 		ORDER BY timestamp
-		LIMIT %d`, limit), todayStr)
+		LIMIT ?`, todayStr, limit)
 	if err != nil {
 		return
 	}
@@ -507,12 +507,12 @@ func appendMeshHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr stri
 
 // appendKnownDevices adds the "ALL KNOWN DEVICES" section.
 func appendKnownDevices(sb *strings.Builder, db *sql.DB, aliases map[string]string, limit int) {
-	rows, err := db.Query(fmt.Sprintf(`
+	rows, err := db.Query(`
 		SELECT mac, name, MAX(timestamp) as last_seen, COUNT(*) as samples
 		FROM bandwidth_samples
 		GROUP BY mac
 		ORDER BY last_seen DESC
-		LIMIT %d`, limit))
+		LIMIT ?`, limit)
 	if err != nil {
 		return
 	}
@@ -594,6 +594,7 @@ func streamOllamaChat(ctx context.Context, ollamaURL string, req ollamaChatReque
 	var full strings.Builder
 	firstToken := true
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large chunks
 	for scanner.Scan() {
 		var chunk ollamaChatChunk
 		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
@@ -925,7 +926,7 @@ func saveConversation(messages []ollamaMessage, path string) error {
 		}
 	}
 
-	if err := os.WriteFile(path, []byte(sb.String()), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(sb.String()), 0600); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Conversation saved to %s\n", path)

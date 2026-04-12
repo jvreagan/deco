@@ -46,7 +46,9 @@ func ParsePeriod(period string) (time.Time, string, error) {
 	case "30d":
 		return time.Now().AddDate(0, 0, -30), "Last 30 days", nil
 	case "all":
-		return time.Time{}, "All time", nil
+		// Use Unix epoch (1970) instead of Go zero time (year 0001) to produce
+		// a valid, unambiguous RFC3339 timestamp for SQL comparisons.
+		return time.Unix(0, 0).UTC(), "All time", nil
 	default:
 		return time.Time{}, "", fmt.Errorf("unrecognized period %q", period)
 	}
