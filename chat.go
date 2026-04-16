@@ -904,10 +904,10 @@ func saveConversation(messages []ollamaMessage, path string) error {
 		path = fmt.Sprintf("deco-chat-%s.md", time.Now().Format("2006-01-02-150405"))
 	}
 
-	// Resolve relative to home directory if not absolute
-	if !filepath.IsAbs(path) {
+	// Resolve ~/ prefix to home directory; otherwise keep relative to CWD
+	if strings.HasPrefix(path, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
-			path = filepath.Join(home, path)
+			path = filepath.Join(home, path[2:])
 		}
 	}
 

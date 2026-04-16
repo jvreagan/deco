@@ -140,17 +140,11 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						name := c.Name
 						m = addActivity(m, fmt.Sprintf("New: %s (%s)", name, mac))
 					}
-					// Cap knownMACs to prevent unbounded growth in long-running sessions.
-					if len(m.knownMACs) >= 1000 {
-						// Evict arbitrary entries to make room.
-						for k := range m.knownMACs {
-							delete(m.knownMACs, k)
-							if len(m.knownMACs) < 900 {
-								break
-							}
-						}
+					// Cap knownMACs to prevent unbounded growth. 10K is more
+					// than enough for any home network, even with MAC rotation.
+					if len(m.knownMACs) < 10000 {
+						m.knownMACs[mac] = true
 					}
-					m.knownMACs[mac] = true
 				}
 			}
 		}

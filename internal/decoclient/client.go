@@ -641,20 +641,14 @@ func (dc *DecoClient) Request(ctx context.Context, path string, reqData map[stri
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "API error code: -40401") || strings.Contains(errMsg, "API error code: -40403") {
 			dc.mu.Lock()
-			needsReauth := dc.logged // still logged means no one else invalidated yet
-			if needsReauth {
+			if dc.logged {
 				dc.invalidate()
 			}
 			dc.mu.Unlock()
-			if needsReauth {
-				if authErr := dc.authorize(ctx); authErr != nil {
-					return nil, fmt.Errorf("re-auth failed: %v (original: %v)", authErr, err)
-				}
-			} else {
-				// Another goroutine already invalidated; let EnsureAuthorized handle it
-				if authErr := dc.EnsureAuthorized(ctx); authErr != nil {
-					return nil, fmt.Errorf("re-auth failed: %v (original: %v)", authErr, err)
-				}
+			// Always use EnsureAuthorized so the authorizing guard serializes
+			// concurrent re-auth attempts (avoids racing on AES keys/stok).
+			if authErr := dc.EnsureAuthorized(ctx); authErr != nil {
+				return nil, fmt.Errorf("re-auth failed: %v (original: %v)", authErr, err)
 			}
 			return dc.requestOnce(ctx, path, reqData)
 		}

@@ -40,6 +40,13 @@ func StoreNetworkSnapshot(database *sql.DB, network *decoclient.NetworkInfo, ts 
 		dns1 = network.WAN.DNS[0]
 		dns2 = network.WAN.DNS[1]
 	}
+	var cpu, mem sql.NullFloat64
+	if network.Performance.CPUPercent != nil {
+		cpu = sql.NullFloat64{Float64: *network.Performance.CPUPercent, Valid: true}
+	}
+	if network.Performance.MemPercent != nil {
+		mem = sql.NullFloat64{Float64: *network.Performance.MemPercent, Valid: true}
+	}
 	tx, err := database.Begin()
 	if err != nil {
 		decolog.Warn("[%s] DB error (network tx begin): %v", logTS, err)
@@ -47,7 +54,7 @@ func StoreNetworkSnapshot(database *sql.DB, network *decoclient.NetworkInfo, ts 
 	}
 	if _, err := tx.Exec(`INSERT INTO network_snapshots (timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2, lan_ip, lan_netmask, cpu_percent, mem_percent)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ts, network.WAN.IP, network.WAN.Gateway, dns1, dns2, network.LAN.IP, network.LAN.Netmask, network.Performance.CPUPercent, network.Performance.MemPercent); err != nil {
+		ts, network.WAN.IP, network.WAN.Gateway, dns1, dns2, network.LAN.IP, network.LAN.Netmask, cpu, mem); err != nil {
 		tx.Rollback()
 		decolog.Warn("[%s] DB error (network): %v", logTS, err)
 		return

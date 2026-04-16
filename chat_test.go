@@ -766,11 +766,13 @@ func TestSaveConversation(t *testing.T) {
 }
 
 func TestSaveConversationDefaultFilename(t *testing.T) {
-	// Redirect HOME to a temp dir so the test doesn't write to the real home.
-	// On Windows, os.UserHomeDir() checks USERPROFILE first.
+	// Change to a temp dir so the test doesn't write to the repo.
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("USERPROFILE", tmpDir)
+	origDir, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
 
 	messages := []ollamaMessage{
 		{Role: "user", Content: "test"},
@@ -781,11 +783,11 @@ func TestSaveConversationDefaultFilename(t *testing.T) {
 		t.Fatalf("saveConversation with default path failed: %v", err)
 	}
 
-	// Verify the file was created in the temp dir
+	// Verify the file was created in CWD (tmpDir)
 	pattern := fmt.Sprintf("deco-chat-%s-*.md", time.Now().Format("2006-01-02"))
 	matches, _ := filepath.Glob(filepath.Join(tmpDir, pattern))
 	if len(matches) == 0 {
-		t.Error("expected generated file in temp home dir")
+		t.Error("expected generated file in CWD")
 	}
 }
 

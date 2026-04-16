@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -103,10 +104,6 @@ func connectClient() (*DecoClient, *Config, error) {
 		return nil, nil, err
 	}
 
-	if err := decoclient.ValidateConfig(config); err != nil {
-		return nil, nil, err
-	}
-
 	client := decoclient.NewDecoClient(config.Host, config.Password)
 
 	var authErr error
@@ -119,7 +116,7 @@ func connectClient() (*DecoClient, *Config, error) {
 		}
 	}
 	if authErr != nil {
-		return nil, nil, fmt.Errorf("connecting (after 3 attempts): %v", authErr)
+		return nil, nil, fmt.Errorf("connecting to %s (after 3 attempts): %v\nCheck that the host is correct, or run 'deco setup'", config.Host, authErr)
 	}
 
 	return client, config, nil
@@ -491,7 +488,7 @@ func runPoll(interval int, maxFailures int) error {
 			return err
 		}
 
-		storeBandwidthSamples(cfg.DB, data, time.Now().Format(time.RFC3339))
+		storeBandwidthSamples(cfg.DB, data, time.Now().UTC().Format(time.RFC3339))
 
 		activeCount := 0
 		var totalDown, totalUp int64
@@ -580,7 +577,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 			return fmt.Errorf("all requests failed")
 		}
 
-		timestamp := time.Now().Format(time.RFC3339)
+		timestamp := time.Now().UTC().Format(time.RFC3339)
 		ts := time.Now().Format("15:04:05")
 
 		clientCount := 0
@@ -764,7 +761,7 @@ func sendWebhook(webhookURL string, payload WebhookPayload) {
 func notifyNewMAC(mac, name, ip, webhookURL string) {
 	// Sanitize for AppleScript embedding: replace double quotes, strip control chars
 	safeName := strings.Map(func(r rune) rune {
-		if r == '"' {
+		if r == '"' || r == '`' || r == '\\' {
 			return '\''
 		}
 		if r < 32 {
@@ -816,14 +813,30 @@ func resolveDeviceMAC(db *sql.DB, identifier string) (string, error) {
 		return "", fmt.Errorf("ambiguous match for %q — multiple devices match:\n%s\nUse a MAC address or more specific name", identifier, strings.Join(names, "\n"))
 	}
 
-	// Search bandwidth_samples name field (LIKE)
+	// Search bandwidth_samples name field (LIKE) — collect distinct MACs to detect ambiguity.
 	escaped := strings.ReplaceAll(strings.ReplaceAll(identifier, "!", "!!"), "%", "!%")
 	escaped = strings.ReplaceAll(escaped, "_", "!_")
-	var mac string
-	err := db.QueryRow(`SELECT mac FROM bandwidth_samples WHERE LOWER(name) LIKE ? ESCAPE '!' LIMIT 1`,
-		"%"+strings.ToLower(escaped)+"%").Scan(&mac)
+	rows, err := db.Query(`SELECT mac, name FROM bandwidth_samples WHERE LOWER(name) LIKE ? ESCAPE '!' GROUP BY mac ORDER BY MAX(timestamp) DESC`,
+		"%"+strings.ToLower(escaped)+"%")
 	if err == nil {
-		return strings.ToUpper(mac), nil
+		defer rows.Close()
+		var dbMatches []struct{ mac, name string }
+		for rows.Next() {
+			var m, n string
+			if rows.Scan(&m, &n) == nil {
+				dbMatches = append(dbMatches, struct{ mac, name string }{strings.ToUpper(m), n})
+			}
+		}
+		if len(dbMatches) == 1 {
+			return dbMatches[0].mac, nil
+		}
+		if len(dbMatches) > 1 {
+			var names []string
+			for _, m := range dbMatches {
+				names = append(names, fmt.Sprintf("  %s (%s)", m.name, m.mac))
+			}
+			return "", fmt.Errorf("ambiguous match for %q — multiple devices match:\n%s\nUse a MAC address or more specific name", identifier, strings.Join(names, "\n"))
+		}
 	}
 
 	return "", fmt.Errorf("device %q not found", identifier)
@@ -845,7 +858,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	if err != nil {
 		return err
 	}
-	startStr := startTime.Format(time.RFC3339)
+	startStr := startTime.UTC().Format(time.RFC3339)
 
 	aliases := loadAliases()
 	alias := aliases[mac]
@@ -885,7 +898,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 		Name:            name.String,
 		Alias:           alias,
 		Period:          periodName,
-		StartTime:       startStr,
+		StartTime:       startTime.Format(time.RFC3339),
 		QueryTime:       time.Now().Format(time.RFC3339),
 		FirstSeen:       firstSeen.String,
 		LastSeen:        lastSeen.String,
@@ -900,7 +913,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	// Query 2: Hourly timeline
 	rows, err := db.Query(`
 		SELECT
-			strftime('%Y-%m-%dT%H:00:00', timestamp) as hour,
+			strftime('%Y-%m-%dT%H:00:00', timestamp, 'localtime') as hour,
 			SUM(download_kbps) as down,
 			SUM(upload_kbps) as up,
 			COUNT(*) as samples
@@ -995,13 +1008,13 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 	}
 	defer db.Close()
 
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return fmt.Errorf("begin transaction: %v", err)
 	}
-	defer tx.Rollback()
+	defer tx.Commit()
 
-	startStr := startTime.Format(time.RFC3339)
+	startStr := startTime.UTC().Format(time.RFC3339)
 
 	query := `
 		SELECT
@@ -1132,7 +1145,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 
 	report := &Report{
 		Period:          periodName,
-		StartTime:       startStr,
+		StartTime:       startTime.Format(time.RFC3339),
 		QueryTime:       time.Now().Format(time.RFC3339),
 		IntervalSeconds: intervalSec,
 		TotalSamples:    totalSamples,
@@ -1173,7 +1186,7 @@ func runReportNetwork(period string, jsonOut bool) error {
 		       COALESCE(cpu_percent, 0), COALESCE(mem_percent, 0)
 		FROM network_snapshots
 		WHERE timestamp >= ?
-		ORDER BY timestamp`, startTime.Format(time.RFC3339))
+		ORDER BY timestamp`, startTime.UTC().Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("query error: %v", err)
 	}
@@ -1216,7 +1229,7 @@ func runReportMesh(period string, jsonOut bool) error {
 		SELECT timestamp, name, role, ip, mac, status, firmware
 		FROM mesh_snapshots
 		WHERE timestamp >= ?
-		ORDER BY timestamp`, startTime.Format(time.RFC3339))
+		ORDER BY timestamp`, startTime.UTC().Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("query error: %v", err)
 	}
@@ -1335,11 +1348,11 @@ func runPurge(force bool, beforeStr string, days int) error {
 		if !force {
 			fmt.Printf("\nWill delete %d records older than %s\n", count, cutoff.Format("2006-01-02"))
 			fmt.Printf("Database: %s\n", dbpkg.DBPath())
-			fmt.Print("Type 'yes' to confirm: ")
-
-			var confirm string
-			fmt.Scanln(&confirm)
-			if strings.ToLower(confirm) != "yes" {
+			ok, err := confirmAction("Type 'yes' to confirm: ")
+			if err != nil {
+				return err
+			}
+			if !ok {
 				fmt.Println("Purge cancelled.")
 				return nil
 			}
@@ -1364,24 +1377,32 @@ func runPurge(force bool, beforeStr string, days int) error {
 	if !force {
 		fmt.Printf("\nWARNING: This will delete ALL %d bandwidth records and all related snapshots!\n", totalSamples)
 		fmt.Printf("Database: %s\n", dbpkg.DBPath())
-		fmt.Print("Type 'yes' to confirm: ")
-
-		var confirm string
-		fmt.Scanln(&confirm)
-		if strings.ToLower(confirm) != "yes" {
+		ok, err := confirmAction("Type 'yes' to confirm: ")
+		if err != nil {
+			return err
+		}
+		if !ok {
 			fmt.Println("Purge cancelled.")
 			return nil
 		}
 	}
 
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %v", err)
+	}
 	for _, table := range allTables {
-		if _, err := db.Exec("DELETE FROM " + table); err != nil {
+		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("deleting from %s: %v", table, err)
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit purge: %v", err)
+	}
 
-	if _, err := db.Exec("VACUUM"); err != nil {
-		decolog.Warn("VACUUM failed: %v", err)
+	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		decolog.Warn("WAL checkpoint failed: %v", err)
 	}
 
 	fmt.Printf("Purged all records from database.\n")
@@ -1400,10 +1421,11 @@ func purgeByDate(database *sql.DB, cutoff time.Time) (int64, error) {
 
 func runReboot(force bool) error {
 	if !force {
-		fmt.Print("Reboot the router? This will disconnect all devices. Type 'yes' to confirm: ")
-		var confirm string
-		fmt.Scanln(&confirm)
-		if strings.ToLower(confirm) != "yes" {
+		ok, err := confirmAction("Reboot the router? This will disconnect all devices. Type 'yes' to confirm: ")
+		if err != nil {
+			return err
+		}
+		if !ok {
 			fmt.Println("Reboot cancelled.")
 			return nil
 		}
@@ -1545,8 +1567,9 @@ func loadTags() map[string][]string {
 
 	tagMu.RLock()
 	if tagCache.data != nil && info.ModTime().Equal(tagCache.modTime) {
-		defer tagMu.RUnlock()
-		return tagCache.data
+		clone := cloneTags(tagCache.data)
+		tagMu.RUnlock()
+		return clone
 	}
 	tagMu.RUnlock()
 
@@ -1554,7 +1577,7 @@ func loadTags() map[string][]string {
 	tagMu.Lock()
 	defer tagMu.Unlock()
 	if tagCache.data != nil && info.ModTime().Equal(tagCache.modTime) {
-		return tagCache.data
+		return cloneTags(tagCache.data)
 	}
 
 	data, err := os.ReadFile(path)
@@ -1570,7 +1593,15 @@ func loadTags() map[string][]string {
 
 	tagCache.modTime = info.ModTime()
 	tagCache.data = tags
-	return tags
+	return cloneTags(tags)
+}
+
+func cloneTags(m map[string][]string) map[string][]string {
+	c := make(map[string][]string, len(m))
+	for k, v := range m {
+		c[k] = append([]string(nil), v...)
+	}
+	return c
 }
 
 func saveTags(tags map[string][]string) error {
@@ -1704,8 +1735,9 @@ func loadAliases() map[string]string {
 
 	aliasMu.RLock()
 	if aliasCache.data != nil && info.ModTime().Equal(aliasCache.modTime) {
-		defer aliasMu.RUnlock()
-		return aliasCache.data
+		clone := maps.Clone(aliasCache.data)
+		aliasMu.RUnlock()
+		return clone
 	}
 	aliasMu.RUnlock()
 
@@ -1713,7 +1745,7 @@ func loadAliases() map[string]string {
 	aliasMu.Lock()
 	defer aliasMu.Unlock()
 	if aliasCache.data != nil && info.ModTime().Equal(aliasCache.modTime) {
-		return aliasCache.data
+		return maps.Clone(aliasCache.data)
 	}
 
 	data, err := os.ReadFile(path)
@@ -1729,7 +1761,7 @@ func loadAliases() map[string]string {
 
 	aliasCache.modTime = info.ModTime()
 	aliasCache.data = aliases
-	return aliases
+	return maps.Clone(aliases)
 }
 
 func saveAliases(aliases map[string]string) error {
@@ -1760,11 +1792,13 @@ func filterClients(data *ClientList, nameFilter, macFilter string) *ClientList {
 
 	for _, c := range data.Clients {
 		if nameFilter != "" {
-			name := strings.ToLower(c.Name)
+			lowerFilter := strings.ToLower(nameFilter)
+			origName := strings.ToLower(c.Name)
+			aliasName := ""
 			if alias, ok := aliases[strings.ToUpper(c.MAC)]; ok {
-				name = strings.ToLower(alias)
+				aliasName = strings.ToLower(alias)
 			}
-			if !strings.Contains(name, strings.ToLower(nameFilter)) {
+			if !strings.Contains(origName, lowerFilter) && !strings.Contains(aliasName, lowerFilter) {
 				continue
 			}
 		}
@@ -1783,6 +1817,18 @@ func filterClients(data *ClientList, nameFilter, macFilter string) *ClientList {
 }
 
 const maxConsecutiveFailures = 10
+
+// confirmAction prompts for "yes" confirmation. Returns an error if stdin is
+// not a terminal (pipe/redirect), directing the user to use --force instead.
+func confirmAction(prompt string) (bool, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return false, fmt.Errorf("cannot confirm interactively: stdin is not a terminal. Use --force to skip confirmation")
+	}
+	fmt.Print(prompt)
+	var confirm string
+	fmt.Scanln(&confirm)
+	return strings.ToLower(confirm) == "yes", nil
+}
 
 func backoff(failures int, base, max time.Duration) time.Duration {
 	d := base

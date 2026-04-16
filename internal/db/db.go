@@ -254,8 +254,8 @@ func PruneOlderThan(db *sql.DB, days int) error {
 		return fmt.Errorf("commit prune transaction: %v", err)
 	}
 	if totalDeleted > 0 {
-		if _, err := db.Exec("VACUUM"); err != nil {
-			decolog.Warn("VACUUM failed: %v", err)
+		if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			decolog.Warn("WAL checkpoint failed: %v", err)
 		}
 	}
 	return nil

@@ -14,18 +14,6 @@ import (
 // AllTables lists all data tables in the database.
 var AllTables = []string{"bandwidth_samples", "network_snapshots", "mesh_snapshots", "wireless_snapshots"}
 
-// ValidPeriods defines the set of accepted period strings for reports.
-var ValidPeriods = map[string]bool{
-	"today": true,
-	"hour":  true,
-	"1h":    true,
-	"6h":    true,
-	"12h":   true,
-	"24h":   true,
-	"7d":    true,
-	"30d":   true,
-	"all":   true,
-}
 
 // ParsePeriod converts a period string to a start time and display name.
 func ParsePeriod(period string) (time.Time, string, error) {
@@ -50,17 +38,10 @@ func ParsePeriod(period string) (time.Time, string, error) {
 		// a valid, unambiguous RFC3339 timestamp for SQL comparisons.
 		return time.Unix(0, 0).UTC(), "All time", nil
 	default:
-		return time.Time{}, "", fmt.Errorf("unrecognized period %q", period)
+		return time.Time{}, "", fmt.Errorf("unknown period %q; valid periods: today, hour, 1h, 6h, 12h, 24h, 7d, 30d, all", period)
 	}
 }
 
-// ValidatePeriod returns an error if the given period string is not recognized.
-func ValidatePeriod(period string) error {
-	if !ValidPeriods[period] {
-		return fmt.Errorf("unknown period %q; valid periods: today, hour, 1h, 6h, 12h, 24h, 7d, 30d, all", period)
-	}
-	return nil
-}
 
 // CachedInterval caches the result of EstimateInterval to avoid redundant queries.
 var CachedInterval struct {
@@ -201,8 +182,8 @@ func PurgeByDate(database *sql.DB, cutoff time.Time) (int64, error) {
 		return total, fmt.Errorf("commit transaction: %v", err)
 	}
 	if total > 0 {
-		if _, err := database.Exec("VACUUM"); err != nil {
-			decolog.Warn("VACUUM failed: %v", err)
+		if _, err := database.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			decolog.Warn("WAL checkpoint failed: %v", err)
 		}
 	}
 	return total, nil

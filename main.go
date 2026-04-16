@@ -182,7 +182,7 @@ func reportCmd() *cobra.Command {
   deco report network [period]   WAN IP history and CPU/memory trends
   deco report mesh [period]      Mesh node uptime history
 
-Periods: today (default), hour, all`,
+Periods: today (default), hour, 1h, 6h, 12h, 24h, 7d, 30d, all`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			period := "today"
@@ -253,7 +253,7 @@ func reportDeviceCmd() *cobra.Command {
   deco report device MyPhone hour --csv
 
 The device can be specified by MAC address, alias, or name substring.
-Periods: today (default), hour, all`,
+Periods: today (default), hour, 1h, 6h, 12h, 24h, 7d, 30d, all`,
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			identifier := args[0]
