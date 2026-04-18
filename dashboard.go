@@ -29,6 +29,7 @@ type dashboardModel struct {
 	network    *NetworkInfo
 	mesh       *MeshInfo
 	wireless   *WirelessInfo
+	aliases    map[string]string
 	activity   []activityEntry
 	lastUpdate time.Time
 	err        error
@@ -153,6 +154,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.network = msg.network
 		m.mesh = msg.mesh
 		m.wireless = msg.wireless
+		m.aliases = loadAliases()
 		m = addActivity(m, "Updated")
 	}
 
@@ -236,9 +238,7 @@ func (m dashboardModel) View() string {
 }
 
 func (m dashboardModel) renderClients(width int) string {
-	// loadAliases is called on every render cycle, but uses file-based caching
-	// (aliasCache): it only re-reads the file when the mod time changes.
-	aliases := loadAliases()
+	aliases := m.aliases
 	var sb strings.Builder
 	sb.WriteString(headerStyle.Render("CLIENTS"))
 	sb.WriteString("\n")

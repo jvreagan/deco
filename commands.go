@@ -106,10 +106,16 @@ func connectClient() (*DecoClient, *Config, error) {
 
 	client := decoclient.NewDecoClient(config.Host, config.Password)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
 	var authErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		if authErr = client.Authorize(); authErr == nil {
+		if authErr = client.EnsureAuthorized(ctx); authErr == nil {
 			break
+		}
+		if ctx.Err() != nil {
+			return nil, nil, fmt.Errorf("connecting to %s timed out: %v", config.Host, authErr)
 		}
 		if attempt < 3 {
 			time.Sleep(backoff(attempt-1, 1*time.Second, 5*time.Second))
@@ -662,8 +668,10 @@ var privateNets []*net.IPNet
 
 func init() {
 	for _, cidr := range []string{
+		"0.0.0.0/8",
 		"127.0.0.0/8",
 		"10.0.0.0/8",
+		"100.64.0.0/10",
 		"172.16.0.0/12",
 		"192.168.0.0/16",
 		"169.254.0.0/16",
@@ -675,12 +683,22 @@ func init() {
 
 // isPrivateIP checks whether an IP is in a private/reserved range.
 func isPrivateIP(ip net.IP) bool {
+	// Unwrap IPv4-mapped IPv6 (e.g., ::ffff:192.168.1.1) to its IPv4 form.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
 	if ip.Equal(net.IPv6loopback) {
 		return true
 	}
-	// fc00::/7 covers fc00:: through fdff:: (IPv6 ULA)
-	if len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
-		return true
+	if len(ip) == net.IPv6len {
+		// fc00::/7 — IPv6 ULA
+		if ip[0]&0xfe == 0xfc {
+			return true
+		}
+		// fe80::/10 — IPv6 link-local
+		if ip[0] == 0xfe && ip[1]&0xc0 == 0x80 {
+			return true
+		}
 	}
 	for _, n := range privateNets {
 		if n.Contains(ip) {
@@ -772,11 +790,12 @@ func notifyNewMAC(mac, name, ip, webhookURL string) {
 	msg := fmt.Sprintf("NEW DEVICE: %s (%s) at %s", safeName, mac, ip)
 	decolog.Info("%s", msg)
 
-	// macOS desktop notification (best-effort)
-	// Use -e with separate statements to avoid shell injection via device names.
-	script := fmt.Sprintf(`display notification %q with title "Deco: New Device"`, msg)
-	cmd := exec.Command("osascript", "-e", script)
-	cmd.Run()
+	// Desktop notification (macOS only, best-effort)
+	if runtime.GOOS == "darwin" {
+		script := fmt.Sprintf(`display notification %q with title "Deco: New Device"`, msg)
+		cmd := exec.Command("osascript", "-e", script)
+		cmd.Run()
+	}
 
 	sendWebhook(webhookURL, WebhookPayload{
 		Event:     "new_device",
@@ -826,6 +845,9 @@ func resolveDeviceMAC(db *sql.DB, identifier string) (string, error) {
 			if rows.Scan(&m, &n) == nil {
 				dbMatches = append(dbMatches, struct{ mac, name string }{strings.ToUpper(m), n})
 			}
+		}
+		if err := rows.Err(); err != nil {
+			return "", fmt.Errorf("querying device name: %v", err)
 		}
 		if len(dbMatches) == 1 {
 			return dbMatches[0].mac, nil
@@ -1012,7 +1034,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 	if err != nil {
 		return fmt.Errorf("begin transaction: %v", err)
 	}
-	defer tx.Commit()
+	defer tx.Rollback()
 
 	startStr := startTime.UTC().Format(time.RFC3339)
 
@@ -1062,7 +1084,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 		})
 	}
 	if err := rows.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: error iterating rows: %v\n", err)
+		return fmt.Errorf("error iterating bandwidth rows: %v", err)
 	}
 
 	// Query connection-type breakdown per device.
@@ -1102,12 +1124,13 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 		var filtered []ReportDevice
 		for _, d := range devices {
 			if nameFilter != "" {
-				name := strings.ToLower(d.Name)
-				// Also check alias
+				lowerFilter := strings.ToLower(nameFilter)
+				origName := strings.ToLower(d.Name)
+				aliasName := ""
 				if alias, ok := aliases[strings.ToUpper(d.MAC)]; ok {
-					name = strings.ToLower(alias)
+					aliasName = strings.ToLower(alias)
 				}
-				if !strings.Contains(name, strings.ToLower(nameFilter)) {
+				if !strings.Contains(origName, lowerFilter) && !strings.Contains(aliasName, lowerFilter) {
 					continue
 				}
 			}
@@ -1123,6 +1146,9 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 
 	if group != "" {
 		tags := loadTags()
+		if len(tags) == 0 {
+			return fmt.Errorf("no tags defined. Use 'deco tag <MAC> <tag>' to create tags")
+		}
 		var grouped []ReportDevice
 		for _, d := range devices {
 			for _, t := range tags[strings.ToUpper(d.MAC)] {
@@ -1131,6 +1157,9 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 					break
 				}
 			}
+		}
+		if len(grouped) == 0 {
+			return fmt.Errorf("no devices found with tag %q. Use 'deco tag list' to see all tags", group)
 		}
 		devices = grouped
 	}
@@ -1368,14 +1397,18 @@ func runPurge(force bool, beforeStr string, days int) error {
 		return nil
 	}
 
-	// Full purge
-	var totalSamples int64
-	if err := db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&totalSamples); err != nil {
-		return fmt.Errorf("counting records: %v", err)
+	// Full purge — count all tables
+	var totalRecords int64
+	for _, table := range allTables {
+		var c int64
+		if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&c); err != nil {
+			return fmt.Errorf("counting records in %s: %v", table, err)
+		}
+		totalRecords += c
 	}
 
 	if !force {
-		fmt.Printf("\nWARNING: This will delete ALL %d bandwidth records and all related snapshots!\n", totalSamples)
+		fmt.Printf("\nWARNING: This will delete ALL %d records across all tables!\n", totalRecords)
 		fmt.Printf("Database: %s\n", dbpkg.DBPath())
 		ok, err := confirmAction("Type 'yes' to confirm: ")
 		if err != nil {
@@ -1594,6 +1627,19 @@ func loadTags() map[string][]string {
 	tagCache.modTime = info.ModTime()
 	tagCache.data = tags
 	return cloneTags(tags)
+}
+
+// resetCaches clears the in-process alias and tag caches. Used by tests.
+func resetCaches() {
+	aliasMu.Lock()
+	aliasCache.data = nil
+	aliasCache.modTime = time.Time{}
+	aliasMu.Unlock()
+
+	tagMu.Lock()
+	tagCache.data = nil
+	tagCache.modTime = time.Time{}
+	tagMu.Unlock()
 }
 
 func cloneTags(m map[string][]string) map[string][]string {

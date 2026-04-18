@@ -45,11 +45,14 @@ func ParsePeriod(period string) (time.Time, string, error) {
 
 // CachedInterval caches the result of EstimateInterval to avoid redundant queries.
 var CachedInterval struct {
-	mu    sync.Mutex
-	Since time.Time
-	Val   int
-	Set   bool
+	mu      sync.Mutex
+	Since   time.Time
+	Val     int
+	Set     bool
+	CachedAt time.Time
 }
+
+const intervalCacheTTL = 5 * time.Minute
 
 // ResetCachedInterval clears the cached interval state. Intended for use in tests.
 func ResetCachedInterval() {
@@ -72,7 +75,7 @@ type Querier interface {
 // Accepts both *sql.DB and *sql.Tx via the Querier interface.
 func EstimateInterval(database Querier, since time.Time) int {
 	CachedInterval.mu.Lock()
-	if CachedInterval.Set && CachedInterval.Since.Equal(since) {
+	if CachedInterval.Set && CachedInterval.Since.Equal(since) && time.Since(CachedInterval.CachedAt) < intervalCacheTTL {
 		val := CachedInterval.Val
 		CachedInterval.mu.Unlock()
 		return val
@@ -121,6 +124,7 @@ func EstimateInterval(database Querier, since time.Time) int {
 	CachedInterval.Since = since
 	CachedInterval.Val = result
 	CachedInterval.Set = true
+	CachedInterval.CachedAt = time.Now()
 	CachedInterval.mu.Unlock()
 
 	return result

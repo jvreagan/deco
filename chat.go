@@ -96,13 +96,13 @@ func listOllamaModels(ollamaURL string) error {
 	return nil
 }
 
-// resolveModel checks if the requested model is available on Ollama.
-// If not found, it auto-selects the first available model and prints a notice.
+// resolveModel checks that Ollama is reachable and the requested model is available.
+// If the model is not found, it auto-selects the first available model and prints a notice.
 func resolveModel(ollamaURL, model string) (string, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(ollamaURL + "/api/tags")
 	if err != nil {
-		return model, nil // can't check, proceed with requested model
+		return "", fmt.Errorf("cannot reach Ollama at %s: %v\nIs Ollama running? Start it with: ollama serve", ollamaURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -110,7 +110,7 @@ func resolveModel(ollamaURL, model string) (string, error) {
 		Models []ollamaModelInfo `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return model, nil
+		return model, nil // reachable but unexpected response — proceed optimistically
 	}
 
 	if len(result.Models) == 0 {
@@ -134,17 +134,6 @@ func resolveModel(ollamaURL, model string) (string, error) {
 	fmt.Fprintf(os.Stderr, "Available: %s\n", strings.Join(names, ", "))
 	fmt.Fprintf(os.Stderr, "Use --list-models to see all, or --model <name> to specify.\n")
 	return selected, nil
-}
-
-// checkOllama verifies that an Ollama instance is reachable.
-func checkOllama(ollamaURL string) error {
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(ollamaURL + "/api/tags")
-	if err != nil {
-		return fmt.Errorf("cannot reach Ollama at %s: %v\nIs Ollama running? Start it with: ollama serve", ollamaURL, err)
-	}
-	resp.Body.Close()
-	return nil
 }
 
 // Context limits to keep the system prompt within reasonable token budgets.
@@ -636,11 +625,8 @@ func resolveOllamaURL(flagURL string) string {
 // runChat is the main entry point for the chat command.
 func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 	ollamaURL = resolveOllamaURL(ollamaURL)
-	if err := checkOllama(ollamaURL); err != nil {
-		return err
-	}
 
-	// Auto-detect model
+	// Verify Ollama is reachable and resolve the model
 	resolved, err := resolveModel(ollamaURL, model)
 	if err != nil {
 		return err

@@ -185,13 +185,15 @@ func InitDB() (*sql.DB, error) {
 	return db, nil
 }
 
-// GetDBSize returns the size of the database file in bytes.
+// GetDBSize returns the total size of the database files (main + WAL + SHM) in bytes.
 func GetDBSize() int64 {
-	info, err := os.Stat(dbPath)
-	if err != nil {
-		return 0
+	var total int64
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if info, err := os.Stat(dbPath + suffix); err == nil {
+			total += info.Size()
+		}
 	}
-	return info.Size()
+	return total
 }
 
 const dbSizeCheckThrottleSec = 60

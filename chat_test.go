@@ -16,8 +16,8 @@ import (
 
 // ==================== OLLAMA CONNECTIVITY TESTS ====================
 
-func TestCheckOllamaNotRunning(t *testing.T) {
-	err := checkOllama("http://127.0.0.1:1") // port 1 should never be listening
+func TestResolveModelNotRunning(t *testing.T) {
+	_, err := resolveModel("http://127.0.0.1:1", "llama3.2") // port 1 should never be listening
 	if err == nil {
 		t.Fatal("expected error for unreachable Ollama")
 	}
@@ -29,7 +29,7 @@ func TestCheckOllamaNotRunning(t *testing.T) {
 	}
 }
 
-func TestCheckOllamaRunning(t *testing.T) {
+func TestResolveModelRunning(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/tags" {
 			t.Errorf("expected /api/tags, got %s", r.URL.Path)
@@ -39,9 +39,12 @@ func TestCheckOllamaRunning(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	err := checkOllama(ts.URL)
+	resolved, err := resolveModel(ts.URL, "llama3.2")
 	if err != nil {
 		t.Fatalf("expected nil error, got: %v", err)
+	}
+	if resolved != "llama3.2" {
+		t.Errorf("expected model 'llama3.2', got %q", resolved)
 	}
 }
 
@@ -1187,13 +1190,13 @@ func TestResolveModelNoModels(t *testing.T) {
 }
 
 func TestResolveModelUnreachable(t *testing.T) {
-	// When Ollama is unreachable, should return the model unchanged (optimistic)
-	model, err := resolveModel("http://127.0.0.1:1", "llama3.2")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// When Ollama is unreachable, resolveModel should return a helpful error.
+	_, err := resolveModel("http://127.0.0.1:1", "llama3.2")
+	if err == nil {
+		t.Fatal("expected error for unreachable Ollama")
 	}
-	if model != "llama3.2" {
-		t.Errorf("expected llama3.2 (unchanged), got %s", model)
+	if !strings.Contains(err.Error(), "cannot reach Ollama") {
+		t.Errorf("expected helpful error, got: %v", err)
 	}
 }
 

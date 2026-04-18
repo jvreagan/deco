@@ -244,7 +244,11 @@ func TestBackoff(t *testing.T) {
 func testEnv(t *testing.T) string {
 	t.Helper()
 	origDBPath := dbpkg.DBPath()
-	t.Cleanup(func() { setDBPath(origDBPath) })
+	t.Cleanup(func() {
+		setDBPath(origDBPath)
+		resetCaches()
+	})
+	resetCaches()
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	setDBPath(paths.CfgPath("network_usage.db"))
