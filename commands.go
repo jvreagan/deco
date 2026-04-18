@@ -34,7 +34,10 @@ func runSetup() error {
 
 	fmt.Print("Router IP [192.168.68.1]: ")
 	if !scanner.Scan() {
-		return fmt.Errorf("failed to read input: %v", scanner.Err())
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("failed to read input: %v", err)
+		}
+		return fmt.Errorf("no input provided (stdin closed)")
 	}
 	host := strings.TrimSpace(scanner.Text())
 	if host == "" {
@@ -47,7 +50,10 @@ func runSetup() error {
 	if err != nil {
 		// Fallback to plain text if terminal is not available
 		if !scanner.Scan() {
-			return fmt.Errorf("failed to read input: %v", scanner.Err())
+			if err := scanner.Err(); err != nil {
+				return fmt.Errorf("failed to read password: %v", err)
+			}
+			return fmt.Errorf("no password provided (stdin closed)")
 		}
 		passwordBytes = []byte(strings.TrimSpace(scanner.Text()))
 	}
@@ -436,7 +442,7 @@ func runAll() error {
 	}
 
 	data := AllInfo{
-		Timestamp: time.Now().Format(time.RFC3339),
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Router:    config.Host,
 		Network:   network,
 		Wireless:  wireless,
@@ -494,7 +500,9 @@ func runPoll(interval int, maxFailures int) error {
 			return err
 		}
 
-		storeBandwidthSamples(cfg.DB, data, time.Now().UTC().Format(time.RFC3339))
+		if err := storeBandwidthSamples(cfg.DB, data, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			decolog.Warn("store error: %v", err)
+		}
 
 		activeCount := 0
 		var totalDown, totalUp int64
@@ -515,17 +523,17 @@ func runPoll(interval int, maxFailures int) error {
 
 // Thin wrappers delegating to internal/db.
 
-func storeBandwidthSamples(database *sql.DB, clients *ClientList, ts string) {
-	dbpkg.StoreBandwidthSamples(database, clients, ts)
+func storeBandwidthSamples(database *sql.DB, clients *ClientList, ts string) error {
+	return dbpkg.StoreBandwidthSamples(database, clients, ts)
 }
-func storeNetworkSnapshot(database *sql.DB, network *NetworkInfo, ts string) {
-	dbpkg.StoreNetworkSnapshot(database, network, ts)
+func storeNetworkSnapshot(database *sql.DB, network *NetworkInfo, ts string) error {
+	return dbpkg.StoreNetworkSnapshot(database, network, ts)
 }
-func storeMeshSnapshot(database *sql.DB, mesh *MeshInfo, ts string) {
-	dbpkg.StoreMeshSnapshot(database, mesh, ts)
+func storeMeshSnapshot(database *sql.DB, mesh *MeshInfo, ts string) error {
+	return dbpkg.StoreMeshSnapshot(database, mesh, ts)
 }
-func storeWirelessSnapshot(database *sql.DB, wireless *WirelessInfo, ts string) {
-	dbpkg.StoreWirelessSnapshot(database, wireless, ts)
+func storeWirelessSnapshot(database *sql.DB, wireless *WirelessInfo, ts string) error {
+	return dbpkg.StoreWirelessSnapshot(database, wireless, ts)
 }
 
 // runMonitor starts a full network monitor that polls all data endpoints and stores
@@ -589,7 +597,9 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 		clientCount := 0
 		if clientErr == nil {
 			clientCount = len(clientData.Clients)
-			storeBandwidthSamples(db, clientData, timestamp)
+			if err := storeBandwidthSamples(db, clientData, timestamp); err != nil {
+				decolog.Warn("store error: %v", err)
+			}
 			for _, c := range clientData.Clients {
 				if notify && knownMACs != nil {
 					macUpper := strings.ToUpper(c.MAC)
@@ -602,6 +612,8 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 					rate := c.DownloadKbps + c.UploadKbps
 					if rate > alertThreshold {
 						name := c.Name
+						// Reload aliases each cycle so changes are picked up while running.
+						aliases = loadAliases()
 						if alias, ok := aliases[strings.ToUpper(c.MAC)]; ok {
 							name = alias
 						}
@@ -624,7 +636,9 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 		if networkErr == nil {
 			cpuPct = networkData.Performance.CPUPercent
 			memPct = networkData.Performance.MemPercent
-			storeNetworkSnapshot(db, networkData, timestamp)
+			if err := storeNetworkSnapshot(db, networkData, timestamp); err != nil {
+				decolog.Warn("store error: %v", err)
+			}
 		} else {
 			decolog.Info("[%s] Error getting network: %v", ts, networkErr)
 		}
@@ -632,13 +646,17 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 		meshCount := 0
 		if meshErr == nil {
 			meshCount = len(meshData.Devices)
-			storeMeshSnapshot(db, meshData, timestamp)
+			if err := storeMeshSnapshot(db, meshData, timestamp); err != nil {
+				decolog.Warn("store error: %v", err)
+			}
 		} else {
 			decolog.Info("[%s] Error getting mesh: %v", ts, meshErr)
 		}
 
 		if wirelessErr == nil {
-			storeWirelessSnapshot(db, wirelessData, timestamp)
+			if err := storeWirelessSnapshot(db, wirelessData, timestamp); err != nil {
+				decolog.Warn("store error: %v", err)
+			}
 		} else {
 			decolog.Info("[%s] Error getting wireless: %v", ts, wirelessErr)
 		}
@@ -882,6 +900,12 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	}
 	startStr := startTime.UTC().Format(time.RFC3339)
 
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
 	aliases := loadAliases()
 	alias := aliases[mac]
 
@@ -892,7 +916,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	var totalDown, totalUp float64
 	var maxDown, maxUp int64
 
-	err = db.QueryRow(`
+	err = tx.QueryRow(`
 		SELECT
 			name,
 			MIN(timestamp) as first_seen,
@@ -933,7 +957,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	}
 
 	// Query 2: Hourly timeline
-	rows, err := db.Query(`
+	rows, err := tx.Query(`
 		SELECT
 			strftime('%Y-%m-%dT%H:00:00', timestamp, 'localtime') as hour,
 			SUM(download_kbps) as down,
@@ -961,7 +985,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	}
 
 	// Query 3: Connection type breakdown
-	connRows, err := db.Query(`
+	connRows, err := tx.Query(`
 		SELECT connection, COUNT(*) as samples
 		FROM bandwidth_samples
 		WHERE mac = ? AND timestamp >= ?
@@ -983,7 +1007,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 	}
 
 	// Query 4: IP history
-	ipRows, err := db.Query(`
+	ipRows, err := tx.Query(`
 		SELECT ip, MIN(timestamp) as first_seen, MAX(timestamp) as last_seen, COUNT(*) as samples
 		FROM bandwidth_samples
 		WHERE mac = ? AND timestamp >= ? AND ip IS NOT NULL AND ip != ''
@@ -1210,7 +1234,13 @@ func runReportNetwork(period string, jsonOut bool) error {
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`
 		SELECT timestamp, wan_ip, wan_gateway, wan_dns1, wan_dns2,
 		       COALESCE(cpu_percent, 0), COALESCE(mem_percent, 0)
 		FROM network_snapshots
@@ -1226,6 +1256,7 @@ func runReportNetwork(period string, jsonOut bool) error {
 	for rows.Next() {
 		var e NetworkReportEntry
 		if err := rows.Scan(&e.Timestamp, &e.WANIP, &e.Gateway, &e.DNS1, &e.DNS2, &e.CPU, &e.Memory); err != nil {
+			decolog.Warn("scan network row: %v", err)
 			continue
 		}
 		entries = append(entries, e)
@@ -1254,7 +1285,13 @@ func runReportMesh(period string, jsonOut bool) error {
 	}
 	defer db.Close()
 
-	rows, err := db.Query(`
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`
 		SELECT timestamp, name, role, ip, mac, status, firmware
 		FROM mesh_snapshots
 		WHERE timestamp >= ?
@@ -1268,6 +1305,7 @@ func runReportMesh(period string, jsonOut bool) error {
 	for rows.Next() {
 		var e MeshReportEntry
 		if err := rows.Scan(&e.Timestamp, &e.Name, &e.Role, &e.IP, &e.MAC, &e.Status, &e.Firmware); err != nil {
+			decolog.Warn("scan mesh row: %v", err)
 			continue
 		}
 		entries = append(entries, e)
@@ -1308,16 +1346,22 @@ func runStatus(jsonOut bool) error {
 	}
 	defer db.Close()
 
+	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin transaction: %v", err)
+	}
+	defer tx.Rollback()
+
 	var totalSamples, uniqueDevices int64
 	var firstSample, lastSample sql.NullString
 
-	if err := db.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&totalSamples); err != nil {
+	if err := tx.QueryRow("SELECT COUNT(*) FROM bandwidth_samples").Scan(&totalSamples); err != nil {
 		return fmt.Errorf("failed to count samples: %v", err)
 	}
-	if err := db.QueryRow("SELECT COUNT(DISTINCT mac) FROM bandwidth_samples").Scan(&uniqueDevices); err != nil {
+	if err := tx.QueryRow("SELECT COUNT(DISTINCT mac) FROM bandwidth_samples").Scan(&uniqueDevices); err != nil {
 		return fmt.Errorf("failed to count devices: %v", err)
 	}
-	if err := db.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM bandwidth_samples").Scan(&firstSample, &lastSample); err != nil {
+	if err := tx.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM bandwidth_samples").Scan(&firstSample, &lastSample); err != nil {
 		return fmt.Errorf("failed to get time range: %v", err)
 	}
 
@@ -1667,7 +1711,7 @@ func saveTags(tags map[string][]string) error {
 		return fmt.Errorf("saving tags: %v", err)
 	}
 
-	if err := os.WriteFile(paths.CfgPath("deco_tags.json"), data, 0600); err != nil {
+	if err := atomicWriteFile(paths.CfgPath("deco_tags.json"), data, 0600); err != nil {
 		return fmt.Errorf("saving tags: %v", err)
 	}
 	// Invalidate tag cache so next loadTags picks up the change
@@ -1810,6 +1854,16 @@ func loadAliases() map[string]string {
 	return maps.Clone(aliases)
 }
 
+// atomicWriteFile writes data to a temp file then renames it into place,
+// preventing file corruption from interrupted writes.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func saveAliases(aliases map[string]string) error {
 	if err := paths.EnsureConfigDir(); err != nil {
 		return fmt.Errorf("creating config dir: %v", err)
@@ -1820,7 +1874,7 @@ func saveAliases(aliases map[string]string) error {
 		return fmt.Errorf("saving aliases: %v", err)
 	}
 
-	if err := os.WriteFile(paths.CfgPath("deco_aliases.json"), data, 0600); err != nil {
+	if err := atomicWriteFile(paths.CfgPath("deco_aliases.json"), data, 0600); err != nil {
 		return fmt.Errorf("saving aliases: %v", err)
 	}
 	// Invalidate alias cache so next loadAliases picks up the change

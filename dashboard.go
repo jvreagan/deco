@@ -118,17 +118,16 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tickMsg:
-		return m, tea.Batch(
-			fetchData(m.decoClient),
-			tickCmd(time.Duration(m.interval)*time.Second),
-		)
+		// Only start the fetch; the next tick is scheduled when data arrives,
+		// preventing fetch pileup when the router is slow.
+		return m, fetchData(m.decoClient)
 
 	case dataMsg:
 		m.lastUpdate = time.Now()
 		if msg.err != nil {
 			m.err = msg.err
 			m = addActivity(m, "Error: "+msg.err.Error())
-			return m, nil
+			return m, tickCmd(time.Duration(m.interval) * time.Second)
 		}
 		m.err = nil
 
@@ -156,6 +155,8 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.wireless = msg.wireless
 		m.aliases = loadAliases()
 		m = addActivity(m, "Updated")
+		// Schedule next tick after data arrives (not alongside the fetch).
+		return m, tickCmd(time.Duration(m.interval) * time.Second)
 	}
 
 	return m, nil

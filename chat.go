@@ -75,7 +75,7 @@ func listOllamaModels(ollamaURL string) error {
 	var result struct {
 		Models []ollamaModelInfo `json:"models"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1*1024*1024)).Decode(&result); err != nil {
 		return fmt.Errorf("failed to parse model list: %v", err)
 	}
 
@@ -109,7 +109,7 @@ func resolveModel(ollamaURL, model string) (string, error) {
 	var result struct {
 		Models []ollamaModelInfo `json:"models"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1*1024*1024)).Decode(&result); err != nil {
 		return model, nil // reachable but unexpected response — proceed optimistically
 	}
 
@@ -576,7 +576,7 @@ func streamOllamaChat(ctx context.Context, ollamaURL string, req ollamaChatReque
 
 	if resp.StatusCode != http.StatusOK {
 		fmt.Fprint(os.Stderr, "\r            \r")
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 		return "", fmt.Errorf("ollama returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -643,7 +643,9 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 	}
 
 	fmt.Fprint(os.Stderr, "Gathering network data... ")
-	systemPrompt, currentSnapshot := gatherNetworkContext(context.Background(), compact, chatDB)
+	gatherCtx, gatherCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	systemPrompt, currentSnapshot := gatherNetworkContext(gatherCtx, compact, chatDB)
+	gatherCancel()
 	fmt.Fprintln(os.Stderr, "done.")
 
 	if showContext {

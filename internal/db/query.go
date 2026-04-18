@@ -17,7 +17,7 @@ var AllTables = []string{"bandwidth_samples", "network_snapshots", "mesh_snapsho
 
 // ParsePeriod converts a period string to a start time and display name.
 func ParsePeriod(period string) (time.Time, string, error) {
-	switch period {
+	switch strings.ToLower(period) {
 	case "today":
 		now := time.Now()
 		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()), "Today", nil
