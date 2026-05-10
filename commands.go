@@ -10,6 +10,7 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -771,7 +772,13 @@ func sendWebhook(webhookURL string, payload WebhookPayload) {
 		return
 	}
 
-	if strings.HasPrefix(webhookURL, "http://") {
+	u, parseErr := url.Parse(webhookURL)
+	if parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		decolog.Warn("webhook URL has invalid scheme (must be http or https): %s", webhookURL)
+		return
+	}
+
+	if u.Scheme == "http" {
 		decolog.Warn("webhook URL uses plain HTTP (not HTTPS): %s", webhookURL)
 	}
 
@@ -808,11 +815,15 @@ func notifyNewMAC(mac, name, ip, webhookURL string) {
 	msg := fmt.Sprintf("NEW DEVICE: %s (%s) at %s", safeName, mac, ip)
 	decolog.Info("%s", msg)
 
-	// Desktop notification (macOS only, best-effort)
+	// Desktop notification (macOS only, best-effort, 5s timeout to avoid blocking monitor)
 	if runtime.GOOS == "darwin" {
 		script := fmt.Sprintf(`display notification %q with title "Deco: New Device"`, msg)
-		cmd := exec.Command("osascript", "-e", script)
-		cmd.Run()
+		notifyCtx, notifyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer notifyCancel()
+		cmd := exec.CommandContext(notifyCtx, "osascript", "-e", script)
+		if err := cmd.Run(); err != nil {
+			decolog.Debug("notification failed: %v", err)
+		}
 	}
 
 	sendWebhook(webhookURL, WebhookPayload{
@@ -1121,6 +1132,7 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 		FROM bandwidth_samples WHERE timestamp >= ? GROUP BY mac, connection`,
 		startStr)
 	if connErr == nil {
+		defer connRows.Close()
 		breakdown := map[string]map[string]int64{}
 		for connRows.Next() {
 			var m, conn string
@@ -1135,7 +1147,6 @@ func runReport(period string, jsonOut, csvOut bool, nameFilter, macFilter, group
 		if err := connRows.Err(); err != nil {
 			decolog.Warn("error iterating connection breakdown: %v", err)
 		}
-		connRows.Close()
 		for i := range devices {
 			if bd, ok := breakdown[devices[i].MAC]; ok {
 				devices[i].ConnectionBreakdown = bd

@@ -110,7 +110,8 @@ func resolveModel(ollamaURL, model string) (string, error) {
 		Models []ollamaModelInfo `json:"models"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1*1024*1024)).Decode(&result); err != nil {
-		return model, nil // reachable but unexpected response — proceed optimistically
+		decolog.Warn("unexpected response from Ollama /api/tags: %v", err)
+		return model, nil // proceed optimistically
 	}
 
 	if len(result.Models) == 0 {
@@ -786,7 +787,9 @@ func processChatCommand(input string, state *chatState) (bool, error) {
 	if input == "refresh" {
 		fmt.Fprint(os.Stderr, "Refreshing network data... ")
 		oldSnapshot := state.currentSnapshot
-		newPrompt, newSnapshot := gatherNetworkContext(context.Background(), state.compact, state.chatDB)
+		refreshCtx, refreshCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer refreshCancel()
+		newPrompt, newSnapshot := gatherNetworkContext(refreshCtx, state.compact, state.chatDB)
 		state.currentSnapshot = newSnapshot
 		state.messages = []ollamaMessage{
 			{Role: "system", Content: newPrompt},
@@ -796,9 +799,11 @@ func processChatCommand(input string, state *chatState) (bool, error) {
 		return false, nil
 	}
 	if input == "save" || strings.HasPrefix(input, "save ") {
-		path := strings.TrimPrefix(input, "save ")
-		if path == "save" {
+		var path string
+		if input == "save" {
 			path = ""
+		} else {
+			path = strings.TrimPrefix(input, "save ")
 		}
 		if err := saveConversation(state.messages, path); err != nil {
 			fmt.Fprintf(os.Stderr, "Error saving: %v\n", err)

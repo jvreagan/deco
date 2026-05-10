@@ -16,7 +16,10 @@ import (
 // DBSizeLimitBytes is the maximum database size before writes are blocked.
 const DBSizeLimitBytes = 1 * 1024 * 1024 * 1024 // 1 GB
 
-var dbPath string
+var (
+	dbPath   string
+	dbPathMu sync.RWMutex
+)
 
 func init() {
 	dbPath = paths.CfgPath("network_usage.db")
@@ -24,11 +27,15 @@ func init() {
 
 // SetDBPath overrides the database path (used in tests).
 func SetDBPath(path string) {
+	dbPathMu.Lock()
+	defer dbPathMu.Unlock()
 	dbPath = path
 }
 
 // DBPath returns the current database path.
 func DBPath() string {
+	dbPathMu.RLock()
+	defer dbPathMu.RUnlock()
 	return dbPath
 }
 
@@ -162,7 +169,7 @@ func InitDB() (*sql.DB, error) {
 	if err := paths.EnsureConfigDir(); err != nil {
 		return nil, fmt.Errorf("cannot create config directory: %v", err)
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", DBPath())
 	if err != nil {
 		return nil, err
 	}
@@ -187,9 +194,10 @@ func InitDB() (*sql.DB, error) {
 
 // GetDBSize returns the total size of the database files (main + WAL + SHM) in bytes.
 func GetDBSize() int64 {
+	path := DBPath()
 	var total int64
 	for _, suffix := range []string{"", "-wal", "-shm"} {
-		if info, err := os.Stat(dbPath + suffix); err == nil {
+		if info, err := os.Stat(path + suffix); err == nil {
 			total += info.Size()
 		}
 	}
@@ -212,12 +220,13 @@ func CheckDBSizeLimit() (bool, int64) {
 	defer dbSizeCheckMu.Unlock()
 
 	now := time.Now()
-	if !lastDBSizeCheckTime.IsZero() && lastDBSizeCheckPath == dbPath && now.Sub(lastDBSizeCheckTime).Seconds() < float64(dbSizeCheckThrottleSec) {
+	path := DBPath()
+	if !lastDBSizeCheckTime.IsZero() && lastDBSizeCheckPath == path && now.Sub(lastDBSizeCheckTime).Seconds() < float64(dbSizeCheckThrottleSec) {
 		return lastDBSizeCheckOK, lastDBSizeCheckSize
 	}
 	size := GetDBSize()
 	lastDBSizeCheckTime = now
-	lastDBSizeCheckPath = dbPath
+	lastDBSizeCheckPath = path
 	lastDBSizeCheckOK = size < DBSizeLimitBytes
 	lastDBSizeCheckSize = size
 	return lastDBSizeCheckOK, size

@@ -273,7 +273,9 @@ func (dc *DecoClient) getPasswordKeys(ctx context.Context) error {
 	}
 
 	dc.pwdN = new(big.Int)
-	dc.pwdN.SetString(result.Result.Password[0], 16)
+	if _, ok := dc.pwdN.SetString(result.Result.Password[0], 16); !ok {
+		return fmt.Errorf("invalid RSA modulus in password keys response")
+	}
 
 	return nil
 }
@@ -314,7 +316,9 @@ func (dc *DecoClient) getAuthKeys(ctx context.Context) error {
 	}
 
 	dc.signN = new(big.Int)
-	dc.signN.SetString(result.Result.Key[0], 16)
+	if _, ok := dc.signN.SetString(result.Result.Key[0], 16); !ok {
+		return fmt.Errorf("invalid RSA modulus in auth keys response")
+	}
 	dc.seq = result.Result.Seq
 
 	return nil
@@ -392,7 +396,7 @@ func (dc *DecoClient) authorize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create login request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Referer", fmt.Sprintf("http://%s/webpages/index.html", dc.host))
 
 	resp, err := dc.client.Do(req)
@@ -446,17 +450,25 @@ func (dc *DecoClient) authorize(ctx context.Context) error {
 		return fmt.Errorf("login failed with error code: %d", decryptedResp.ErrorCode)
 	}
 
-	dc.stok = decryptedResp.Result.Stok
+	// Return session values — the caller (EnsureAuthorized) writes them
+	// under the mutex to avoid races with concurrent requestOnce calls.
+	stok := decryptedResp.Result.Stok
 
 	// Extract sysauth cookie
+	var sysauth string
 	cookieHeader := resp.Header.Get("Set-Cookie")
 	matches := sysauthRegexp.FindStringSubmatch(cookieHeader)
 	if len(matches) > 1 {
-		dc.sysauth = matches[1]
+		sysauth = matches[1]
 	}
 
+	dc.mu.Lock()
+	dc.stok = stok
+	dc.sysauth = sysauth
 	dc.logged = true
 	dc.lastAuthTime = time.Now()
+	dc.mu.Unlock()
+
 	return nil
 }
 
@@ -476,7 +488,9 @@ type requestSnapshot struct {
 }
 
 func (dc *DecoClient) requestOnce(ctx context.Context, path string, reqData map[string]interface{}) (map[string]interface{}, error) {
-	// Rate limit: snapshot timing under the lock, sleep outside.
+	// Rate limit and snapshot in a single critical section.
+	// Pre-reserve the time slot so concurrent goroutines see the updated
+	// lastRequest and space their own requests correctly (no TOCTOU gap).
 	dc.mu.Lock()
 	var sleepDur time.Duration
 	if !dc.lastRequest.IsZero() {
@@ -484,14 +498,7 @@ func (dc *DecoClient) requestOnce(ctx context.Context, path string, reqData map[
 			sleepDur = MinRequestInterval - elapsed
 		}
 	}
-	dc.mu.Unlock()
-	if sleepDur > 0 {
-		time.Sleep(sleepDur)
-	}
-
-	// Snapshot shared state under the lock, then release immediately.
-	dc.mu.Lock()
-	dc.lastRequest = time.Now()
+	dc.lastRequest = time.Now().Add(sleepDur) // pre-reserve the slot
 	snap := requestSnapshot{
 		aesKey:   dc.aesKey,
 		aesIV:    dc.aesIV,
@@ -504,6 +511,10 @@ func (dc *DecoClient) requestOnce(ctx context.Context, path string, reqData map[
 		seq:      dc.seq,
 	}
 	dc.mu.Unlock()
+
+	if sleepDur > 0 {
+		time.Sleep(sleepDur)
+	}
 
 	// All crypto, HTTP I/O, and response parsing happen without holding the mutex.
 	return dc.doRequest(ctx, path, reqData, snap)
@@ -540,7 +551,7 @@ func (dc *DecoClient) doRequest(ctx context.Context, path string, reqData map[st
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Referer", fmt.Sprintf("http://%s/webpages/index.html", snap.host))
 
 	if snap.sysauth != "" {
@@ -753,13 +764,27 @@ func (dc *DecoClient) GetClients(ctx context.Context) (*ClientList, error) {
 }
 
 // GetNetwork returns the network configuration (WAN, LAN, performance).
+// Both API calls are made in parallel for lower latency.
 func (dc *DecoClient) GetNetwork(ctx context.Context) (*NetworkInfo, error) {
-	data, err := dc.Request(ctx, "admin/network?form=wan_ipv4", map[string]interface{}{"operation": "read"})
-	if err != nil {
-		return nil, err
-	}
+	var (
+		data, perf          map[string]interface{}
+		wanErr, perfErr     error
+		wg                  sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		data, wanErr = dc.Request(ctx, "admin/network?form=wan_ipv4", map[string]interface{}{"operation": "read"})
+	}()
+	go func() {
+		defer wg.Done()
+		perf, perfErr = dc.Request(ctx, "admin/network?form=performance", map[string]interface{}{"operation": "read"})
+	}()
+	wg.Wait()
 
-	perf, perfErr := dc.Request(ctx, "admin/network?form=performance", map[string]interface{}{"operation": "read"})
+	if wanErr != nil {
+		return nil, wanErr
+	}
 	if perfErr != nil {
 		decolog.Debug("performance query failed: %v", perfErr)
 	}

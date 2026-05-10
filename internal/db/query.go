@@ -44,11 +44,12 @@ func ParsePeriod(period string) (time.Time, string, error) {
 
 
 // CachedInterval caches the result of EstimateInterval to avoid redundant queries.
+// The cache is TTL-based only (no key on the `since` parameter) because the
+// sampling interval is a property of the database, not the query window.
 var CachedInterval struct {
-	mu      sync.Mutex
-	Since   time.Time
-	Val     int
-	Set     bool
+	mu       sync.Mutex
+	Val      int
+	Set      bool
 	CachedAt time.Time
 }
 
@@ -59,7 +60,6 @@ func ResetCachedInterval() {
 	CachedInterval.mu.Lock()
 	defer CachedInterval.mu.Unlock()
 	CachedInterval.Set = false
-	CachedInterval.Since = time.Time{}
 	CachedInterval.Val = 0
 }
 
@@ -75,7 +75,7 @@ type Querier interface {
 // Accepts both *sql.DB and *sql.Tx via the Querier interface.
 func EstimateInterval(database Querier, since time.Time) int {
 	CachedInterval.mu.Lock()
-	if CachedInterval.Set && CachedInterval.Since.Equal(since) && time.Since(CachedInterval.CachedAt) < intervalCacheTTL {
+	if CachedInterval.Set && time.Since(CachedInterval.CachedAt) < intervalCacheTTL {
 		val := CachedInterval.Val
 		CachedInterval.mu.Unlock()
 		return val
@@ -121,7 +121,6 @@ func EstimateInterval(database Querier, since time.Time) int {
 	result := gaps[len(gaps)/2] // median
 
 	CachedInterval.mu.Lock()
-	CachedInterval.Since = since
 	CachedInterval.Val = result
 	CachedInterval.Set = true
 	CachedInterval.CachedAt = time.Now()

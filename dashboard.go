@@ -376,6 +376,7 @@ func runDashboard(interval int) error {
 	}
 
 	dc := decoclient.NewDecoClient(config.Host, config.Password)
+	defer dc.Logout()
 
 	m := dashboardModel{
 		host:       config.Host,
