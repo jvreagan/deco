@@ -866,7 +866,7 @@ func TestConnectClientError(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	_, _, err := connectClient()
+	_, _, err := connectClient(context.Background())
 	if err == nil {
 		t.Error("connectClient() should return error when no config exists")
 	}

@@ -406,8 +406,8 @@ func formatConnBreakdown(breakdown map[string]int64) string {
 
 	var parts []string
 	for _, k := range keys {
-		pct := breakdown[k] * 100 / total
-		parts = append(parts, fmt.Sprintf("%s:%d%%", connAbbrev(k), pct))
+		pct := float64(breakdown[k]) * 100.0 / float64(total)
+		parts = append(parts, fmt.Sprintf("%s:%.0f%%", connAbbrev(k), pct))
 	}
 	return strings.Join(parts, " ")
 }

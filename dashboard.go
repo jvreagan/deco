@@ -41,6 +41,8 @@ type dashboardModel struct {
 	height     int
 	quitting   bool
 	knownMACs  map[string]bool
+	cancelCtx  context.Context    // cancelled on quit to abort in-flight requests
+	cancelFunc context.CancelFunc // called on quit
 }
 
 // tickMsg triggers a data fetch.
@@ -61,10 +63,9 @@ func tickCmd(d time.Duration) tea.Cmd {
 	})
 }
 
-func fetchData(dc *DecoClient) tea.Cmd {
+func fetchData(dc *DecoClient, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		// Ensure we have a valid session; re-authorize if needed.
-		ctx := context.Background()
 		if err := dc.EnsureAuthorized(ctx); err != nil {
 			return dataMsg{err: err}
 		}
@@ -110,6 +111,9 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.quitting = true
+			if m.cancelFunc != nil {
+				m.cancelFunc() // cancel in-flight requests
+			}
 			return m, tea.Quit
 		}
 
@@ -120,7 +124,7 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Only start the fetch; the next tick is scheduled when data arrives,
 		// preventing fetch pileup when the router is slow.
-		return m, fetchData(m.decoClient)
+		return m, fetchData(m.decoClient, m.cancelCtx)
 
 	case dataMsg:
 		m.lastUpdate = time.Now()
@@ -378,12 +382,17 @@ func runDashboard(interval int) error {
 	dc := decoclient.NewDecoClient(config.Host, config.Password)
 	defer dc.Logout()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	m := dashboardModel{
 		host:       config.Host,
 		password:   config.Password,
 		decoClient: dc,
 		interval:   interval,
 		knownMACs:  map[string]bool{},
+		cancelCtx:  ctx,
+		cancelFunc: cancel,
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())

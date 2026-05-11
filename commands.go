@@ -74,7 +74,7 @@ func runSetup() error {
 	}
 	configFile := paths.CfgPath("deco_config.json")
 
-	if err := os.WriteFile(configFile, data, 0600); err != nil {
+	if err := atomicWriteFile(configFile, data, 0600); err != nil {
 		return fmt.Errorf("writing config: %v", err)
 	}
 
@@ -105,7 +105,7 @@ func runVersion() {
 	fmt.Printf("os/arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 }
 
-func connectClient() (*DecoClient, *Config, error) {
+func connectClient(parentCtx context.Context) (*DecoClient, *Config, error) {
 	config, err := decoclient.LoadConfig()
 	if err != nil {
 		return nil, nil, err
@@ -113,15 +113,17 @@ func connectClient() (*DecoClient, *Config, error) {
 
 	client := decoclient.NewDecoClient(config.Host, config.Password)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
 	var authErr error
 	for attempt := 1; attempt <= 3; attempt++ {
-		if authErr = client.EnsureAuthorized(ctx); authErr == nil {
+		// Each attempt gets its own 10-second timeout so one slow attempt
+		// cannot consume the budget for subsequent retries.
+		attemptCtx, attemptCancel := context.WithTimeout(parentCtx, 10*time.Second)
+		authErr = client.EnsureAuthorized(attemptCtx)
+		attemptCancel()
+		if authErr == nil {
 			break
 		}
-		if ctx.Err() != nil {
+		if parentCtx.Err() != nil {
 			return nil, nil, fmt.Errorf("connecting to %s timed out: %v", config.Host, authErr)
 		}
 		if attempt < 3 {
@@ -136,7 +138,7 @@ func connectClient() (*DecoClient, *Config, error) {
 }
 
 func runClients(jsonOut bool, nameFilter, macFilter string) error {
-	client, _, err := connectClient()
+	client, _, err := connectClient(context.Background())
 	if err != nil {
 		return err
 	}
@@ -347,7 +349,7 @@ func runWatch(interval int, nameFilter, macFilter string, maxFailures int) error
 }
 
 func runNetwork(jsonOut bool) error {
-	client, _, err := connectClient()
+	client, _, err := connectClient(context.Background())
 	if err != nil {
 		return err
 	}
@@ -367,7 +369,7 @@ func runNetwork(jsonOut bool) error {
 }
 
 func runWireless(jsonOut bool) error {
-	client, _, err := connectClient()
+	client, _, err := connectClient(context.Background())
 	if err != nil {
 		return err
 	}
@@ -387,7 +389,7 @@ func runWireless(jsonOut bool) error {
 }
 
 func runMesh(jsonOut bool) error {
-	client, _, err := connectClient()
+	client, _, err := connectClient(context.Background())
 	if err != nil {
 		return err
 	}
@@ -407,7 +409,7 @@ func runMesh(jsonOut bool) error {
 }
 
 func runAll() error {
-	client, config, err := connectClient()
+	client, config, err := connectClient(context.Background())
 	if err != nil {
 		return err
 	}
@@ -462,7 +464,7 @@ func runAPI(endpoint, body string) error {
 		return fmt.Errorf("invalid endpoint: path traversal not allowed")
 	}
 
-	client, _, err := connectClient()
+	client, _, err := connectClient(context.Background())
 	if err != nil {
 		return err
 	}
@@ -948,7 +950,7 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 		return fmt.Errorf("no data for device %s in period %s", mac, periodName)
 	}
 
-	intervalSec := estimateInterval(db, startTime)
+	intervalSec := estimateInterval(tx, startTime)
 
 	report := &DeviceReport{
 		MAC:             mac,
@@ -1519,7 +1521,7 @@ func runReboot(force bool) error {
 		}
 	}
 
-	client, _, err := connectClient()
+	client, _, err := connectClient(context.Background())
 	if err != nil {
 		return err
 	}
@@ -1550,7 +1552,7 @@ func runBlockAction(mac string, block bool) error {
 	}
 	mac = strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(mac, ":", "-"), ".", "-"))
 
-	client, _, err := connectClient()
+	client, _, err := connectClient(context.Background())
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -222,7 +223,7 @@ func TestFetchDataConcurrent(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			cmd := fetchData(dc)
+			cmd := fetchData(dc, context.Background())
 			results[idx] = cmd()
 		}(i)
 	}

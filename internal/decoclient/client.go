@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -499,14 +500,20 @@ func (dc *DecoClient) requestOnce(ctx context.Context, path string, reqData map[
 		}
 	}
 	dc.lastRequest = time.Now().Add(sleepDur) // pre-reserve the slot
+	// Deep-copy mutable reference types so the snapshot is truly independent
+	// of dc's state once the mutex is released.
+	var clonedSignN *big.Int
+	if dc.signN != nil {
+		clonedSignN = new(big.Int).Set(dc.signN)
+	}
 	snap := requestSnapshot{
-		aesKey:   dc.aesKey,
-		aesIV:    dc.aesIV,
+		aesKey:   slices.Clone(dc.aesKey),
+		aesIV:    slices.Clone(dc.aesIV),
 		stok:     dc.stok,
 		sysauth:  dc.sysauth,
 		host:     dc.host,
 		password: dc.password,
-		signN:    dc.signN,
+		signN:    clonedSignN,
 		signE:    dc.signE,
 		seq:      dc.seq,
 	}
@@ -677,13 +684,18 @@ func (dc *DecoClient) Logout() {
 		dc.mu.Unlock()
 		return
 	}
-	dc.logged = false
 	dc.mu.Unlock()
 
 	// Best-effort logout; don't block callers on unresponsive router.
+	// Send the logout request before clearing the logged flag so concurrent
+	// goroutines don't start re-authenticating while the logout is in flight.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	dc.requestOnce(ctx, "admin/system?form=logout", map[string]interface{}{"operation": "write"})
+
+	dc.mu.Lock()
+	dc.logged = false
+	dc.mu.Unlock()
 }
 
 // ==================== API METHODS ====================

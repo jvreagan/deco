@@ -21,6 +21,12 @@ import (
 	"github.com/jvreagan/deco/internal/paths"
 )
 
+// sqlQuerier is satisfied by both *sql.DB and *sql.Tx.
+type sqlQuerier interface {
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
 const defaultOllamaModel = "llama3.2"
 const defaultOllamaURL = "http://localhost:11434"
 
@@ -177,7 +183,7 @@ func gatherNetworkContext(ctx context.Context, compact bool, db *sql.DB) (string
 
 	// Try live router data
 	liveOK := false
-	client, _, err := connectClient()
+	client, _, err := connectClient(ctx)
 	if err == nil {
 		defer client.Logout()
 		liveOK = true
@@ -309,17 +315,22 @@ func gatherNetworkContext(ctx context.Context, compact bool, db *sql.DB) (string
 		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		todayStr := startOfDay.Format(time.RFC3339)
 
-		appendBandwidthHistory(&sb, histDB, aliases, bandwidthLimit, startOfDay, todayStr)
-		appendNetworkHistory(&sb, histDB, netSnapLimit, todayStr)
-		appendMeshHistory(&sb, histDB, meshSnapLimit, todayStr)
-		appendKnownDevices(&sb, histDB, aliases, knownLimit)
+		// Use a read-only transaction for a consistent snapshot across all history queries.
+		tx, txErr := histDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if txErr == nil {
+			defer tx.Rollback()
+			appendBandwidthHistory(&sb, tx, aliases, bandwidthLimit, startOfDay, todayStr)
+			appendNetworkHistory(&sb, tx, netSnapLimit, todayStr)
+			appendMeshHistory(&sb, tx, meshSnapLimit, todayStr)
+			appendKnownDevices(&sb, tx, aliases, knownLimit)
+		}
 	}
 
 	return sb.String(), snap
 }
 
 // appendBandwidthHistory adds the "TOP BANDWIDTH TODAY" section to the context.
-func appendBandwidthHistory(sb *strings.Builder, db *sql.DB, aliases map[string]string, limit int, startOfDay time.Time, todayStr string) {
+func appendBandwidthHistory(sb *strings.Builder, db sqlQuerier, aliases map[string]string, limit int, startOfDay time.Time, todayStr string) {
 	rows, err := db.Query(`
 		SELECT mac, name,
 			SUM(download_kbps) as total_download,
@@ -380,7 +391,7 @@ func appendBandwidthHistory(sb *strings.Builder, db *sql.DB, aliases map[string]
 }
 
 // appendNetworkHistory adds the "WAN IP HISTORY" and performance summary sections.
-func appendNetworkHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr string) {
+func appendNetworkHistory(sb *strings.Builder, db sqlQuerier, limit int, todayStr string) {
 	rows, err := db.Query(`
 		SELECT timestamp, wan_ip,
 			COALESCE(cpu_percent, 0), COALESCE(mem_percent, 0)
@@ -444,7 +455,7 @@ func appendNetworkHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr s
 }
 
 // appendMeshHistory adds the "MESH NODE UPTIME" section.
-func appendMeshHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr string) {
+func appendMeshHistory(sb *strings.Builder, db sqlQuerier, limit int, todayStr string) {
 	rows, err := db.Query(`
 		SELECT name, role, mac, status, firmware
 		FROM mesh_snapshots
@@ -496,7 +507,7 @@ func appendMeshHistory(sb *strings.Builder, db *sql.DB, limit int, todayStr stri
 }
 
 // appendKnownDevices adds the "ALL KNOWN DEVICES" section.
-func appendKnownDevices(sb *strings.Builder, db *sql.DB, aliases map[string]string, limit int) {
+func appendKnownDevices(sb *strings.Builder, db sqlQuerier, aliases map[string]string, limit int) {
 	rows, err := db.Query(`
 		SELECT mac, name, MAX(timestamp) as last_seen, COUNT(*) as samples
 		FROM bandwidth_samples
@@ -583,9 +594,17 @@ func streamOllamaChat(ctx context.Context, ollamaURL string, req ollamaChatReque
 
 	var full strings.Builder
 	firstToken := true
+
+	// Set a per-chunk idle timeout: if no data arrives within 60 seconds,
+	// the context is cancelled and the scanner will return an error.
+	const idleTimeout = 60 * time.Second
+	idleTimer := time.AfterFunc(idleTimeout, cancel)
+	defer idleTimer.Stop()
+
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer for large chunks
 	for scanner.Scan() {
+		idleTimer.Reset(idleTimeout) // got data — reset the idle timer
 		var chunk ollamaChatChunk
 		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
 			return full.String(), fmt.Errorf("decoding stream chunk: %v", err)
@@ -821,11 +840,15 @@ func processChatCommand(input string, state *chatState) (bool, error) {
 	fmt.Print("\nassistant> ")
 	response, err := streamOllamaChat(context.Background(), state.ollamaURL, req, os.Stdout)
 	fmt.Print("\n\n")
+
+	// Save partial response to message history even on error, so the LLM
+	// context stays consistent with what the user saw on screen.
+	if response != "" {
+		state.messages = append(state.messages, ollamaMessage{Role: "assistant", Content: response})
+	}
 	if err != nil {
 		return false, err
 	}
-
-	state.messages = append(state.messages, ollamaMessage{Role: "assistant", Content: response})
 
 	// Trim old messages if history exceeds cap, preserving the system message.
 	if len(state.messages) > maxChatMessages {
@@ -886,6 +909,9 @@ func diffNetworkSnapshots(old, new networkSnapshot) string {
 
 	result := sb.String()
 	if result == "" {
+		if old.DeviceCount == 0 && new.DeviceCount == 0 {
+			return "No device data available (router may be unreachable).\n"
+		}
 		return "No changes detected.\n"
 	}
 	return result
