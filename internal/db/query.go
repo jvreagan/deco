@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sort"
@@ -47,7 +48,7 @@ func ParsePeriod(period string) (time.Time, string, error) {
 // The cache is TTL-based only (no key on the `since` parameter) because the
 // sampling interval is a property of the database, not the query window.
 var CachedInterval struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	Val      int
 	Set      bool
 	CachedAt time.Time
@@ -74,13 +75,13 @@ type Querier interface {
 // Returns the median gap between consecutive distinct timestamps, or 5 as fallback.
 // Accepts both *sql.DB and *sql.Tx via the Querier interface.
 func EstimateInterval(database Querier, since time.Time) int {
-	CachedInterval.mu.Lock()
+	CachedInterval.mu.RLock()
 	if CachedInterval.Set && time.Since(CachedInterval.CachedAt) < intervalCacheTTL {
 		val := CachedInterval.Val
-		CachedInterval.mu.Unlock()
+		CachedInterval.mu.RUnlock()
 		return val
 	}
-	CachedInterval.mu.Unlock()
+	CachedInterval.mu.RUnlock()
 
 	rows, err := database.Query(`SELECT DISTINCT timestamp FROM bandwidth_samples
 		WHERE timestamp >= ? ORDER BY timestamp LIMIT 20`, since.Format(time.RFC3339))
@@ -150,12 +151,19 @@ func LoadKnownMACs(database *sql.DB) map[string]bool {
 }
 
 // CountBeforeDate returns the total number of records across all tables before the cutoff.
+// Uses a read transaction for a consistent snapshot across all table counts.
 func CountBeforeDate(database *sql.DB, cutoff time.Time) (int64, error) {
+	tx, err := database.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return 0, fmt.Errorf("begin read transaction: %v", err)
+	}
+	defer tx.Rollback()
+
 	cutoffStr := cutoff.Format(time.RFC3339)
 	var total int64
 	for _, table := range AllTables {
 		var c int64
-		if err := database.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE timestamp < ?", cutoffStr).Scan(&c); err != nil {
+		if err := tx.QueryRow("SELECT COUNT(*) FROM "+table+" WHERE timestamp < ?", cutoffStr).Scan(&c); err != nil {
 			return total, err
 		}
 		total += c

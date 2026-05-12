@@ -26,6 +26,8 @@ func checkDBCapacity(database *sql.DB) {
 		fmt.Fprintf(os.Stderr, "Warning: database at %.0f%% capacity, auto-pruning records older than 30 days\n", pct)
 		if err := pruneOlderThan(database, 30); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: auto-prune failed: %v\n", err)
+		} else {
+			dbpkg.ResetSizeCache()
 		}
 	} else if pct >= 80 {
 		fmt.Fprintf(os.Stderr, "Warning: database at %.0f%% capacity (%s / %s). Consider running 'deco purge --days 30'\n",

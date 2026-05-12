@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -444,6 +445,10 @@ func runAll() error {
 		fmt.Fprintf(os.Stderr, "Warning: failed to get clients: %v\n", cliErr)
 	}
 
+	if netErr != nil && wlErr != nil && meshErr != nil && cliErr != nil {
+		return fmt.Errorf("all requests failed; last error: %v", netErr)
+	}
+
 	data := AllInfo{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Router:    config.Host,
@@ -517,7 +522,7 @@ func runPoll(interval int, maxFailures int) error {
 			totalUp += int64(c.UploadKbps)
 		}
 
-		decolog.Info("[%s] Sample #%d: %d clients, %d active, %d KB/s down %d KB/s up",
+		fmt.Printf("[%s] Sample #%d: %d clients, %d active, %d KB/s down %d KB/s up\n",
 			time.Now().Format("15:04:05"), cycle+1, len(data.Clients), activeCount, totalDown, totalUp)
 		return nil
 	}
@@ -632,7 +637,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 				}
 			}
 		} else {
-			decolog.Info("[%s] Error getting clients: %v", ts, clientErr)
+			fmt.Fprintf(os.Stderr, "[%s] Error getting clients: %v\n", ts, clientErr)
 		}
 
 		var cpuPct, memPct *float64
@@ -643,7 +648,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 				decolog.Warn("store error: %v", err)
 			}
 		} else {
-			decolog.Info("[%s] Error getting network: %v", ts, networkErr)
+			fmt.Fprintf(os.Stderr, "[%s] Error getting network: %v\n", ts, networkErr)
 		}
 
 		meshCount := 0
@@ -653,7 +658,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 				decolog.Warn("store error: %v", err)
 			}
 		} else {
-			decolog.Info("[%s] Error getting mesh: %v", ts, meshErr)
+			fmt.Fprintf(os.Stderr, "[%s] Error getting mesh: %v\n", ts, meshErr)
 		}
 
 		if wirelessErr == nil {
@@ -661,7 +666,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 				decolog.Warn("store error: %v", err)
 			}
 		} else {
-			decolog.Info("[%s] Error getting wireless: %v", ts, wirelessErr)
+			fmt.Fprintf(os.Stderr, "[%s] Error getting wireless: %v\n", ts, wirelessErr)
 		}
 
 		cpuStr := "?"
@@ -673,7 +678,7 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 			memStr = fmt.Sprintf("%.0f%%", *memPct)
 		}
 
-		decolog.Info("[%s] Cycle #%d: %d clients, CPU %s, Mem %s, %d mesh nodes",
+		fmt.Printf("[%s] Cycle #%d: %d clients, CPU %s, Mem %s, %d mesh nodes\n",
 			ts, cycle+1, clientCount, cpuStr, memStr, meshCount)
 		return nil
 	}
@@ -868,28 +873,30 @@ func resolveDeviceMAC(db *sql.DB, identifier string) (string, error) {
 	escaped = strings.ReplaceAll(escaped, "_", "!_")
 	rows, err := db.Query(`SELECT mac, name FROM bandwidth_samples WHERE LOWER(name) LIKE ? ESCAPE '!' GROUP BY mac ORDER BY MAX(timestamp) DESC`,
 		"%"+strings.ToLower(escaped)+"%")
-	if err == nil {
-		defer rows.Close()
-		var dbMatches []struct{ mac, name string }
-		for rows.Next() {
-			var m, n string
-			if rows.Scan(&m, &n) == nil {
-				dbMatches = append(dbMatches, struct{ mac, name string }{strings.ToUpper(m), n})
-			}
+	if err != nil {
+		decolog.Warn("querying bandwidth_samples for device name: %v", err)
+		return "", fmt.Errorf("device %q not found (no alias or MAC match)", identifier)
+	}
+	defer rows.Close()
+	var dbMatches []struct{ mac, name string }
+	for rows.Next() {
+		var m, n string
+		if rows.Scan(&m, &n) == nil {
+			dbMatches = append(dbMatches, struct{ mac, name string }{strings.ToUpper(m), n})
 		}
-		if err := rows.Err(); err != nil {
-			return "", fmt.Errorf("querying device name: %v", err)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("querying device name: %v", err)
+	}
+	if len(dbMatches) == 1 {
+		return dbMatches[0].mac, nil
+	}
+	if len(dbMatches) > 1 {
+		var names []string
+		for _, m := range dbMatches {
+			names = append(names, fmt.Sprintf("  %s (%s)", m.name, m.mac))
 		}
-		if len(dbMatches) == 1 {
-			return dbMatches[0].mac, nil
-		}
-		if len(dbMatches) > 1 {
-			var names []string
-			for _, m := range dbMatches {
-				names = append(names, fmt.Sprintf("  %s (%s)", m.name, m.mac))
-			}
-			return "", fmt.Errorf("ambiguous match for %q — multiple devices match:\n%s\nUse a MAC address or more specific name", identifier, strings.Join(names, "\n"))
-		}
+		return "", fmt.Errorf("ambiguous match for %q — multiple devices match:\n%s\nUse a MAC address or more specific name", identifier, strings.Join(names, "\n"))
 	}
 
 	return "", fmt.Errorf("device %q not found", identifier)
@@ -1454,17 +1461,25 @@ func runPurge(force bool, beforeStr string, days int) error {
 		return nil
 	}
 
-	// Full purge — count all tables
+	// Full purge — count and delete in a single transaction for consistency.
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %v", err)
+	}
+
 	var totalRecords int64
 	for _, table := range allTables {
 		var c int64
-		if err := db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&c); err != nil {
+		if err := tx.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&c); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("counting records in %s: %v", table, err)
 		}
 		totalRecords += c
 	}
 
 	if !force {
+		// Rollback so we don't hold the transaction during user input.
+		tx.Rollback()
 		fmt.Printf("\nWARNING: This will delete ALL %d records across all tables!\n", totalRecords)
 		fmt.Printf("Database: %s\n", dbpkg.DBPath())
 		ok, err := confirmAction("Type 'yes' to confirm: ")
@@ -1475,12 +1490,13 @@ func runPurge(force bool, beforeStr string, days int) error {
 			fmt.Println("Purge cancelled.")
 			return nil
 		}
+		// Re-open transaction for the actual delete.
+		tx, err = db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin transaction: %v", err)
+		}
 	}
 
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin transaction: %v", err)
-	}
 	for _, table := range allTables {
 		if _, err := tx.Exec("DELETE FROM " + table); err != nil {
 			tx.Rollback()
@@ -1870,8 +1886,24 @@ func loadAliases() map[string]string {
 // atomicWriteFile writes data to a temp file then renames it into place,
 // preventing file corruption from interrupted writes.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, path)

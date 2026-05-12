@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -71,8 +72,13 @@ type ollamaModelInfo struct {
 
 // listOllamaModels queries the Ollama API for available models and prints them.
 func listOllamaModels(ollamaURL string) error {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(ollamaURL + "/api/tags")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ollamaURL+"/api/tags", nil)
+	if err != nil {
+		return fmt.Errorf("creating request: %v", err)
+	}
+	resp, err := ollamaClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("cannot reach Ollama at %s: %v\nIs Ollama running? Start it with: ollama serve", ollamaURL, err)
 	}
@@ -105,8 +111,13 @@ func listOllamaModels(ollamaURL string) error {
 // resolveModel checks that Ollama is reachable and the requested model is available.
 // If the model is not found, it auto-selects the first available model and prints a notice.
 func resolveModel(ollamaURL, model string) (string, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(ollamaURL + "/api/tags")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ollamaURL+"/api/tags", nil)
+	if err != nil {
+		return "", fmt.Errorf("creating request: %v", err)
+	}
+	resp, err := ollamaClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("cannot reach Ollama at %s: %v\nIs Ollama running? Start it with: ollama serve", ollamaURL, err)
 	}
@@ -685,7 +696,9 @@ func runChat(model, ollamaURL, query string, compact, showContext bool) error {
 			Messages: messages,
 			Stream:   true,
 		}
-		_, err := streamOllamaChat(context.Background(), ollamaURL, req, os.Stdout)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer stop()
+		_, err := streamOllamaChat(ctx, ollamaURL, req, os.Stdout)
 		fmt.Println()
 		return err
 	}
@@ -838,7 +851,9 @@ func processChatCommand(input string, state *chatState) (bool, error) {
 	}
 
 	fmt.Print("\nassistant> ")
-	response, err := streamOllamaChat(context.Background(), state.ollamaURL, req, os.Stdout)
+	streamCtx, streamCancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	response, err := streamOllamaChat(streamCtx, state.ollamaURL, req, os.Stdout)
+	streamCancel()
 	fmt.Print("\n\n")
 
 	// Save partial response to message history even on error, so the LLM
@@ -945,7 +960,7 @@ func saveConversation(messages []ollamaMessage, path string) error {
 		}
 	}
 
-	if err := os.WriteFile(path, []byte(sb.String()), 0600); err != nil {
+	if err := atomicWriteFile(path, []byte(sb.String()), 0600); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Conversation saved to %s\n", path)
