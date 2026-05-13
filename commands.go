@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -463,10 +465,14 @@ func runAll() error {
 	return nil
 }
 
+// endpointPattern matches safe API endpoint characters (alphanumeric, slashes,
+// query params, hyphens, underscores, dots — but not ".." sequences).
+var endpointPattern = regexp.MustCompile(`^[a-zA-Z0-9/_?=&.\-]+$`)
+
 func runAPI(endpoint, body string) error {
 	// Reject path traversal and other suspicious characters in the endpoint.
-	if strings.Contains(endpoint, "..") {
-		return fmt.Errorf("invalid endpoint: path traversal not allowed")
+	if strings.Contains(endpoint, "..") || !endpointPattern.MatchString(endpoint) {
+		return fmt.Errorf("invalid endpoint: contains disallowed characters")
 	}
 
 	client, _, err := connectClient(context.Background())
@@ -608,6 +614,8 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 			if err := storeBandwidthSamples(db, clientData, timestamp); err != nil {
 				decolog.Warn("store error: %v", err)
 			}
+			// Reload aliases each cycle so changes are picked up while running.
+			aliases = loadAliases()
 			for _, c := range clientData.Clients {
 				if notify && knownMACs != nil {
 					macUpper := strings.ToUpper(c.MAC)
@@ -620,8 +628,6 @@ func runMonitor(interval int, notify bool, alertThreshold int, webhookURL string
 					rate := c.DownloadKbps + c.UploadKbps
 					if rate > alertThreshold {
 						name := c.Name
-						// Reload aliases each cycle so changes are picked up while running.
-						aliases = loadAliases()
 						if alias, ok := aliases[strings.ToUpper(c.MAC)]; ok {
 							name = alias
 						}
@@ -800,6 +806,7 @@ func sendWebhook(webhookURL string, payload WebhookPayload) {
 		decolog.Warn("webhook POST error: %v", err)
 		return
 	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 1024*1024))
 	resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		decolog.Warn("webhook returned status %d", resp.StatusCode)
@@ -1002,6 +1009,8 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 		if err := rows.Err(); err != nil {
 			decolog.Warn("error iterating timeline rows: %v", err)
 		}
+	} else {
+		decolog.Warn("timeline query failed: %v", err)
 	}
 
 	// Query 3: Connection type breakdown
@@ -1024,6 +1033,8 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 		if err := connRows.Err(); err != nil {
 			decolog.Warn("error iterating connection breakdown rows: %v", err)
 		}
+	} else {
+		decolog.Warn("connection breakdown query failed: %v", err)
 	}
 
 	// Query 4: IP history
@@ -1045,6 +1056,8 @@ func runReportDevice(identifier, period string, jsonOut, csvOut bool) error {
 		if err := ipRows.Err(); err != nil {
 			decolog.Warn("error iterating IP history rows: %v", err)
 		}
+	} else {
+		decolog.Warn("IP history query failed: %v", err)
 	}
 
 	if jsonOut {
@@ -1893,6 +1906,11 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	}
 	tmp := f.Name()
 	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return err

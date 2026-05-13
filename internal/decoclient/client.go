@@ -114,7 +114,7 @@ func ValidateConfig(config *Config) error {
 	if err != nil {
 		return fmt.Errorf("cannot reach router at %s: %v", config.Host, err)
 	}
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("cannot reach router at %s: %v\nCheck that the host is correct, or run 'deco setup'", config.Host, err)
 	}

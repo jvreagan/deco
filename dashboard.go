@@ -124,7 +124,11 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Only start the fetch; the next tick is scheduled when data arrives,
 		// preventing fetch pileup when the router is slow.
-		return m, fetchData(m.decoClient, m.cancelCtx)
+		ctx := m.cancelCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return m, fetchData(m.decoClient, ctx)
 
 	case dataMsg:
 		m.lastUpdate = time.Now()
@@ -144,11 +148,9 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						name := c.Name
 						m = addActivity(m, fmt.Sprintf("New: %s (%s)", name, mac))
 					}
-					// Cap knownMACs to prevent unbounded growth. 10K is more
-					// than enough for any home network, even with MAC rotation.
-					if len(m.knownMACs) < 10000 {
-						m.knownMACs[mac] = true
-					}
+					// Always add the MAC to prevent repeated "New" alerts.
+					// 10K+ entries at ~20 bytes each is negligible memory.
+					m.knownMACs[mac] = true
 				}
 			}
 		}

@@ -647,6 +647,9 @@ func streamOllamaChat(ctx context.Context, ollamaURL string, req ollamaChatReque
 func resolveOllamaURL(flagURL string) string {
 	if flagURL == defaultOllamaURL {
 		if host := os.Getenv("OLLAMA_HOST"); host != "" {
+			if !strings.HasPrefix(host, "http://") && !strings.HasPrefix(host, "https://") {
+				host = "http://" + host
+			}
 			return host
 		}
 	}

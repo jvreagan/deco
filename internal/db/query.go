@@ -52,6 +52,7 @@ var CachedInterval struct {
 	Val      int
 	Set      bool
 	CachedAt time.Time
+	Path     string // database path when value was cached
 }
 
 const intervalCacheTTL = 5 * time.Minute
@@ -62,6 +63,7 @@ func ResetCachedInterval() {
 	defer CachedInterval.mu.Unlock()
 	CachedInterval.Set = false
 	CachedInterval.Val = 0
+	CachedInterval.Path = ""
 }
 
 // Querier is implemented by both *sql.DB and *sql.Tx, allowing functions to
@@ -75,8 +77,9 @@ type Querier interface {
 // Returns the median gap between consecutive distinct timestamps, or 5 as fallback.
 // Accepts both *sql.DB and *sql.Tx via the Querier interface.
 func EstimateInterval(database Querier, since time.Time) int {
+	currentPath := DBPath()
 	CachedInterval.mu.RLock()
-	if CachedInterval.Set && time.Since(CachedInterval.CachedAt) < intervalCacheTTL {
+	if CachedInterval.Set && CachedInterval.Path == currentPath && time.Since(CachedInterval.CachedAt) < intervalCacheTTL {
 		val := CachedInterval.Val
 		CachedInterval.mu.RUnlock()
 		return val
@@ -125,6 +128,7 @@ func EstimateInterval(database Querier, since time.Time) int {
 	CachedInterval.Val = result
 	CachedInterval.Set = true
 	CachedInterval.CachedAt = time.Now()
+	CachedInterval.Path = currentPath
 	CachedInterval.mu.Unlock()
 
 	return result
