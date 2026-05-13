@@ -36,7 +36,7 @@ func CfgPath(filename string) string {
 // the next run resumes where it left off. Config is migrated first (needed
 // to connect), then aliases, then the database (largest, least critical).
 func MigrateIfNeeded() {
-	files := []string{"deco_config.json", "deco_aliases.json", "network_usage.db", "network_usage.db-wal", "network_usage.db-shm"}
+	files := []string{"deco_config.json", "deco_aliases.json", "deco_tags.json", "network_usage.db", "network_usage.db-wal", "network_usage.db-shm"}
 
 	var legacyDirs []string
 	if exe, err := os.Executable(); err == nil {

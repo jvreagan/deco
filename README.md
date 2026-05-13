@@ -41,10 +41,10 @@ deco clients
 | `wireless` | Show WiFi configuration (SSIDs, channels, bands, guest network) |
 | `mesh` | Show mesh node topology (role, firmware, status) |
 | `all` | Complete network snapshot as JSON |
-| `poll` | Live bandwidth monitoring per device |
-| `monitor` | Full network monitoring — logs all data to SQLite |
+| `poll` | Live bandwidth monitoring per device (logs bandwidth samples to SQLite) |
+| `monitor` | Full network monitoring — logs all data to SQLite (bandwidth, network, mesh, wireless) |
 | `dashboard` | Live TUI dashboard (clients, network, mesh, activity log) |
-| `report [period]` | Show bandwidth usage report (`today`, `hour`, or `all`) |
+| `report [period]` | Show bandwidth usage report (`today`, `hour`, `1h`, `6h`, `12h`, `24h`, `7d`, `30d`, `all`) |
 | `report device <MAC\|name>` | Detailed history for a single device |
 | `report network [period]` | WAN IP history and CPU/memory trends |
 | `report mesh [period]` | Mesh node uptime history |
@@ -64,14 +64,14 @@ deco clients
 | Flag | Description |
 |---|---|
 | `--verbose`, `-v` | Show debug output on stderr (global, works with any command) |
-| `--json`, `-j` | Output as JSON (works with `clients`, `network`, `wireless`, `mesh`, `report`) |
+| `--json`, `-j` | Output as JSON (works with `clients`, `network`, `wireless`, `mesh`, `status`, `report`, `report device`, `report network`, `report mesh`) |
 | `--csv` | Output as CSV (use with `report`, `report device`) |
 | `--interval N`, `-i N` | Polling interval in seconds (default: 5 for `poll`/`clients --watch`, 10 for `dashboard`, 60 for `monitor`) |
 | `--force`, `-f` | Skip confirmation prompt for `purge` and `reboot` |
 | `--name`, `-n <name>` | Filter by device name — substring, case-insensitive (`clients`, `report`) |
 | `--mac`, `-m <MAC>` | Filter by MAC address — exact match, case-insensitive (`clients`, `report`) |
 | `--watch`, `-w` | Auto-refresh client list (use with `clients`) |
-| `--notify` | Alert on new MAC addresses via desktop notification (use with `monitor`) |
+| `--notify` | Alert on new MAC addresses (desktop notification on macOS, stdout on other platforms; use with `monitor`) |
 | `--alert N` | Alert when any device exceeds N KB/s (use with `monitor`) |
 | `--webhook <url>` | POST JSON notifications to a webhook URL (use with `monitor`) |
 | `--days N` | Purge records older than N days (use with `purge`) |
@@ -81,6 +81,7 @@ deco clients
 | `--compact` | Use smaller context window for chat (use with `chat`) |
 | `--list-models` | List available Ollama models and exit (use with `chat`) |
 | `--show-context` | Print system prompt to stderr and exit (use with `chat`) |
+| `--max-failures N` | Exit after N consecutive API errors (default: 10; use with `poll`, `monitor`, `clients --watch`) |
 | `--group`, `-g <tag>` | Filter by device tag (use with `report`) |
 
 ### Device Aliases
@@ -90,7 +91,7 @@ Set friendly names for devices that override the router-reported name:
 ```bash
 deco alias                              # List all aliases
 deco alias AA-BB-CC-DD-EE-FF "TV"       # Set an alias
-deco alias --remove AA-BB-CC-DD-EE-FF   # Remove an alias
+deco alias --remove AA-BB-CC-DD-EE-FF   # Remove an alias (or -r)
 ```
 
 Aliases are stored in `~/.config/deco/deco_aliases.json` and are applied in `clients`, `report`, and `chat` output.
