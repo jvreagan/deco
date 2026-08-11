@@ -13,20 +13,34 @@ import (
 )
 
 func generateAESKeyIV() ([]byte, []byte, error) {
-	// Generate random 16-byte hex strings (like Python library)
-	keyBytes := make([]byte, 8)
-	ivBytes := make([]byte, 8)
-	if _, err := rand.Read(keyBytes); err != nil {
+	// Some Deco firmwares (e.g. XE75 Pro) parse the AES key/IV from the sign
+	// parameter numerically, so they must be 16-digit decimal numbers with no
+	// leading zero — hex strings cause the router to reject login with error 1.
+	key, err := random16Digits()
+	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate AES key: %v", err)
 	}
-	if _, err := rand.Read(ivBytes); err != nil {
+	iv, err := random16Digits()
+	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate AES IV: %v", err)
 	}
 
-	key := []byte(hex.EncodeToString(keyBytes))
-	iv := []byte(hex.EncodeToString(ivBytes))
-
 	return key, iv, nil
+}
+
+// random16Digits returns a 16-byte decimal digit string whose first digit is
+// non-zero, matching the format the Deco web client uses for AES key material.
+func random16Digits() ([]byte, error) {
+	digits := make([]byte, 16)
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, err
+	}
+	digits[0] = '1' + buf[0]%9
+	for i := 1; i < 16; i++ {
+		digits[i] = '0' + buf[i]%10
+	}
+	return digits, nil
 }
 
 func pkcs7Pad(data []byte, blockSize int) []byte {
