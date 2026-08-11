@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -107,7 +108,7 @@ func LoadConfig() (*Config, error) {
 // Deco router by hitting the keys endpoint. Falls back to a TCP dial if
 // the HTTP request fails for non-connection reasons.
 func ValidateConfig(config *Config) error {
-	base := "http://" + config.Host
+	base := schemePrefix() + "://" + config.Host
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST", base+"/cgi-bin/luci/;stok=/login?form=keys", nil)
@@ -128,12 +129,25 @@ func ValidateConfig(config *Config) error {
 	return nil
 }
 
+// schemePrefix returns the URL scheme for router API requests. Some newer
+// Deco firmwares only register the login callbacks on HTTPS; set
+// DECO_SCHEME=https to use it (the router's self-signed cert is accepted).
+func schemePrefix() string {
+	if os.Getenv("DECO_SCHEME") == "https" {
+		return "https"
+	}
+	return "http"
+}
+
 // NewDecoClient creates a new DecoClient for the given host and password.
 func NewDecoClient(host, password string) *DecoClient {
 	jar, _ := cookiejar.New(nil) // cookiejar.New never returns an error with nil options
 	client := &http.Client{
 		Jar:     jar,
 		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
 	}
 
 	dc := &DecoClient{
@@ -240,7 +254,7 @@ func (dc *DecoClient) invalidate() {
 }
 
 func (dc *DecoClient) getPasswordKeys(ctx context.Context) error {
-	apiURL := fmt.Sprintf("http://%s/cgi-bin/luci/;stok=/login?form=keys&operation=read", dc.host)
+	apiURL := fmt.Sprintf(schemePrefix()+"://%s/cgi-bin/luci/;stok=/login?form=keys&operation=read", dc.host)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, nil)
 	if err != nil {
@@ -256,6 +270,9 @@ func (dc *DecoClient) getPasswordKeys(ctx context.Context) error {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return fmt.Errorf("failed to read password keys response: %v", err)
+	}
+	if os.Getenv("DECO_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "DEBUG keys resp (%d): %s\n", resp.StatusCode, body)
 	}
 
 	var result struct {
@@ -282,7 +299,7 @@ func (dc *DecoClient) getPasswordKeys(ctx context.Context) error {
 }
 
 func (dc *DecoClient) getAuthKeys(ctx context.Context) error {
-	apiURL := fmt.Sprintf("http://%s/cgi-bin/luci/;stok=/login?form=auth&operation=read", dc.host)
+	apiURL := fmt.Sprintf(schemePrefix()+"://%s/cgi-bin/luci/;stok=/login?form=auth&operation=read", dc.host)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, nil)
 	if err != nil {
@@ -298,6 +315,9 @@ func (dc *DecoClient) getAuthKeys(ctx context.Context) error {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return fmt.Errorf("failed to read auth keys response: %v", err)
+	}
+	if os.Getenv("DECO_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "DEBUG auth resp (%d): %s\n", resp.StatusCode, body)
 	}
 
 	var result struct {
@@ -388,7 +408,7 @@ func (dc *DecoClient) authorize(ctx context.Context) error {
 	}
 
 	// POST login
-	loginURL := fmt.Sprintf("http://%s/cgi-bin/luci/;stok=/login?form=login", dc.host)
+	loginURL := fmt.Sprintf(schemePrefix()+"://%s/cgi-bin/luci/;stok=/login?form=login", dc.host)
 
 	// Build body manually to match Python's order (sign before data)
 	bodyStr := fmt.Sprintf("sign=%s&data=%s", signature, url.QueryEscape(encryptedData))
@@ -397,8 +417,8 @@ func (dc *DecoClient) authorize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create login request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Referer", fmt.Sprintf("http://%s/webpages/index.html", dc.host))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Referer", fmt.Sprintf(schemePrefix()+"://%s/webpages/index.html", dc.host))
 
 	resp, err := dc.client.Do(req)
 	if err != nil {
@@ -413,6 +433,9 @@ func (dc *DecoClient) authorize(ctx context.Context) error {
 
 	if len(body) == 0 {
 		return fmt.Errorf("empty response from login endpoint, status: %d, url: %s", resp.StatusCode, loginURL)
+	}
+	if os.Getenv("DECO_DEBUG") != "" {
+		fmt.Fprintf(os.Stderr, "DEBUG login resp (%d): %s\n", resp.StatusCode, body)
 	}
 
 	var responseData string
@@ -448,6 +471,9 @@ func (dc *DecoClient) authorize(ctx context.Context) error {
 	}
 
 	if decryptedResp.ErrorCode != 0 {
+		if os.Getenv("DECO_DEBUG") != "" {
+			fmt.Fprintf(os.Stderr, "DEBUG login decrypted: %s\n", decrypted)
+		}
 		return fmt.Errorf("login failed with error code: %d", decryptedResp.ErrorCode)
 	}
 
@@ -551,15 +577,15 @@ func (dc *DecoClient) doRequest(ctx context.Context, path string, reqData map[st
 	}
 
 	// Build request
-	reqURL := fmt.Sprintf("http://%s/cgi-bin/luci/;stok=%s/%s", snap.host, snap.stok, path)
+	reqURL := fmt.Sprintf(schemePrefix()+"://%s/cgi-bin/luci/;stok=%s/%s", snap.host, snap.stok, path)
 	bodyStr := fmt.Sprintf("sign=%s&data=%s", signature, url.QueryEscape(encryptedData))
 
 	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, strings.NewReader(bodyStr))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Referer", fmt.Sprintf("http://%s/webpages/index.html", snap.host))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Referer", fmt.Sprintf(schemePrefix()+"://%s/webpages/index.html", snap.host))
 
 	if snap.sysauth != "" {
 		req.AddCookie(&http.Cookie{Name: "sysauth", Value: snap.sysauth})
